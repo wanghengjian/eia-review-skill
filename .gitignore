@@ -1,0 +1,13 @@
+# OS
+.DS_Store
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Large reference files (keep source markdown)
+# HJ616-2011.pdf is 684KB - skip
+*.pdf

@@ -1,0 +1,976 @@
+#!/usr/bin/env python3
+"""
+环评报告书内容提取脚本
+
+功能：
+1. 提取DOCX/DOC/PDF文件的文本和表格
+2. 按一级标题拆分章节
+3. 输出完整文本、表格数据、项目信息
+
+用法：
+    python3 extract_chapters_textutil.py -n "项目名称" -d "报告书.docx" -o output_dir
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# 尝试导入文档处理库
+try:
+    from docx import Document
+except ImportError:
+    Document = None
+
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
+
+
+# 标准章节结构
+STANDARD_CHAPTERS = {
+    "001": {"name": "概述", "keywords": ["概述", "项目由来", "建设项目由来"]},
+    "002": {"name": "第一章 总则", "keywords": ["第一章", "总则", "评价标准", "评价等级", "环境功能区划"]},
+    "003": {"name": "第二章 项目概况", "keywords": ["第二章", "项目概况", "工程组成"]},
+    "004": {"name": "第三章 工程分析", "keywords": ["第三章", "工程分析", "工艺流程", "污染源源强"]},
+    "005": {"name": "第四章 环境现状调查", "keywords": ["第四章", "环境现状", "现状调查", "环境监测"]},
+    "006": {"name": "第五章 环境影响预测", "keywords": ["第五章", "影响预测", "预测评价", "达标分析"]},
+    "007": {"name": "第六章 环境保护措施", "keywords": ["第六章", "环保措施", "污染防治", "处理工艺"]},
+    "008": {"name": "第七章 环境风险评价", "keywords": ["第七章", "环境风险", "风险评价", "应急预案"]},
+    "009": {"name": "第八章 经济损益分析", "keywords": ["第八章", "经济损益", "环境经济", "效益分析"]},
+    "010": {"name": "第九章 环境管理监测", "keywords": ["第九章", "环境管理", "监测计划", "竣工验收"]},
+    "011": {"name": "第十章 结论与建议", "keywords": ["第十章", "结论", "合理性分析", "选址合理"]},
+    "012": {"name": "附件与附表", "keywords": ["附件", "附表", "附录"]},
+}
+
+
+def convert_doc_to_docx(doc_path: str) -> str:
+    """使用macOS textutil将DOC转换为DOCX"""
+    doc_path = Path(doc_path)
+    if not doc_path.exists():
+        raise FileNotFoundError(f"文件不存在: {doc_path}")
+
+    # 如果已经是docx，直接返回
+    if doc_path.suffix.lower() == '.docx':
+        return str(doc_path)
+
+    # 使用textutil转换
+    temp_dir = tempfile.mkdtemp()
+    output_path = Path(temp_dir) / f"{doc_path.stem}.docx"
+
+    try:
+        result = subprocess.run(
+            ['textutil', '-convert', 'docx', '-output', str(output_path), str(doc_path)],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"textutil转换失败: {result.stderr}")
+        return str(output_path)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("DOC转换超时")
+    except FileNotFoundError:
+        raise RuntimeError("textutil命令不可用，请安装Xcode命令行工具")
+
+
+def _get_para_full_text(para) -> str:
+    """获取段落完整文本（包括所有run）"""
+    # para.text 只返回直系文本，需要合并所有run
+    return ''.join(run.text for run in para.runs if run.text)
+
+
+def extract_from_docx(docx_path: str) -> Tuple[str, List[Dict], Dict]:
+    """
+    从DOCX文件提取文本、表格和项目信息。
+
+    按文档顺序遍历 body 元素（段落+表格交替），
+    对每个表格标记其所属章节编号（chapter_num），
+    便于后续审核时将表格与对应章节一起提交给LLM。
+    """
+    if Document is None:
+        raise ImportError("python-docx库未安装，请运行: pip install python-docx")
+
+    doc = Document(docx_path)
+
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+
+    full_text = []
+    tables = []
+    table_id = 0
+
+    # 当前章节编号（000=序言/未分类）
+    current_chapter = '000'
+
+    # 按文档顺序遍历 body 下的所有子元素
+    # CT_P/CT_Tbl 是 lxml 元素，直接使用，无需 ._element
+    body = doc.element.body
+    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    for child in body:
+        if isinstance(child, CT_P):
+            # 段落：用 lxml 提取所有 w:t 元素的文本
+            t_elements = child.findall('.//w:t', ns)
+            text = ''.join(te.text or '' for te in t_elements).strip()
+            if text:
+                full_text.append(text)
+                # 检查是否是章节标题，若是则更新当前章节
+                detected = detect_chapter_number(text)
+                if detected != '999':
+                    current_chapter = detected
+        elif isinstance(child, CT_Tbl):
+            # 表格：用 lxml 提取数据并标记所属章节
+            table_data = []
+            rows = child.findall('.//w:tr', ns)
+            for row in rows:
+                cells = row.findall('.//w:tc', ns)
+                row_data = []
+                for cell in cells:
+                    cell_text = ''.join(
+                        t.text or '' for t in cell.findall('.//w:t', ns)
+                    ).strip()
+                    row_data.append(cell_text)
+                table_data.append(row_data)
+
+            tables.append({
+                "table_id": table_id,
+                "chapter_num": current_chapter,   # 所属章节编号
+                "data": table_data,
+                "rows": len(rows),
+                "cols": len(rows[0].findall('.//w:tc', ns)) if rows else 0
+            })
+            table_id += 1
+
+    full_text_str = '\n\n'.join(full_text)
+
+    # 提取项目信息
+    project_info = extract_project_info(full_text_str, tables)
+
+    return full_text_str, tables, project_info
+
+
+def extract_from_pdf(pdf_path: str) -> Tuple[str, List[Dict], Dict]:
+    """从PDF文件提取文本、表格和项目信息"""
+    if fitz is None:
+        raise ImportError("PyMuPDF库未安装，请运行: pip install pymupdf")
+
+    doc = fitz.open(pdf_path)
+    full_text_parts = []
+    tables = []
+    table_id = 0
+
+    for page_num, page in enumerate(doc):
+        # 提取文本
+        text = page.get_text()
+        if text.strip():
+            full_text_parts.append(text.strip())
+
+        # 提取表格（简化版）
+        # PyMuPDF的表格提取比较复杂，这里用简单方法
+        blocks = page.get_text("dict")["blocks"]
+        for block in blocks:
+            if block.get("type") == 0:  # 文本块
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        # 检查是否是表格形式的文本（连续的短行）
+                        pass
+
+    full_text_str = '\n\n'.join(full_text_parts)
+
+    # 提取项目信息
+    project_info = extract_project_info(full_text_str, tables)
+
+    return full_text_str, tables, project_info
+
+
+def extract_tables_by_keyword(tables: List[Dict], keywords: List[str], min_rows: int = 2) -> List[Dict]:
+    """在所有表格中搜索包含指定关键词的表格，返回匹配表格列表"""
+    results = []
+    for t in tables:
+        all_text = ''.join([''.join(cell) for row in t.get('data', []) for cell in row])
+        header_text = ''.join([''.join(cell) for cell in t.get('header', [])])
+        combined = header_text + all_text
+        if sum(1 for kw in keywords if kw in combined) >= len(keywords) and len(t.get('data', [])) >= min_rows:
+            results.append(t)
+    return results
+
+
+def _extract_line_value(text: str, keyword: str, max_chars: int = 4000) -> str:
+    """在文档开头区域搜索关键词所在行，提取冒号/：后的值，只取到行尾或第一个标点为止
+
+    max_chars: 从头开始搜索的最大字符数，默认4000（覆盖项目信息区域）
+    """
+    scope = text[:max_chars]
+    for line in scope.split('\n'):
+        if keyword in line:
+            # 找到关键词，取后面的内容
+            idx = line.find(keyword) + len(keyword)
+            rest = line[idx:].strip()
+            # 去掉开头的冒号/：/空格/图
+            rest = re.sub(r'^[：:\s图]+', '', rest)
+            # 截取到第一个标点符号为止
+            m = re.match(r'([^，。、；；\n（）()]{0,100})', rest)
+            if m:
+                val = m.group(1).strip()
+                # 去掉末尾的空白字符
+                val = re.sub(r'[。\s]+$', '', val)
+                return val
+    return ""
+
+
+def _get_cell_str(cell) -> str:
+    """提取单元格字符串值，支持 str 或 list[str] 类型"""
+    if isinstance(cell, list):
+        return ''.join(cell).strip()
+    return str(cell).strip()
+
+
+def _find_col_by_keyword(row: list, keywords: list) -> int:
+    """在一行（表头行）中找到包含任意关键词的单元格索引，找不到返回-1"""
+    for ci, cell in enumerate(row):
+        ct = ''.join(cell) if isinstance(cell, list) else str(cell)
+        if any(kw in ct for kw in keywords):
+            return ci
+    return -1
+
+
+def extract_project_info(text: str, tables: List[Dict] = None) -> Dict[str, Any]:
+    """从文本和表格中提取项目基本信息。
+
+    策略：
+    1. 找到"2.1 项目基本情况"或"第二章 项目工程概况"区域（正文中的章节，非目录）
+    2. 在该区域内用 _extract_line_value 提取各项字段
+    3. 投资信息从全文搜索
+    """
+    # ── 1. info dict 初始化 ─────────────────────────────────────────────
+    info: Dict[str, Any] = {
+        "project_name": "",
+        "company": "",
+        "evaluation_level": "",
+        "construction_nature": "",
+        "location": "",
+        "total_investment": "",
+        "environmental_investment": "",
+        "construction_content_scale": "",
+        "wastewater_pollutants": [],
+        "exhaust_gas_pollutants": [],
+        "noise_sources": [],
+        "hazardous_waste": [],
+    }
+
+    # ── 2. 找到项目概况章节的正文区域 ─────────────────────────────────
+    # 搜索章节标题（正文中的，不是目录里的）
+    chapter_start = text.find('\n第二章 项目工程概况\n')
+    if chapter_start < 0:
+        chapter_start = text.find('\n2.1 项目基本情况\n')
+    if chapter_start < 0:
+        # fallback: 找"（1）项目名称："这种格式的位置
+        chapter_start = text.find('（1）项目名称：')
+    if chapter_start < 0:
+        chapter_start = 0
+
+    # 章节结束：下一章（第三章）
+    chapter_end = text.find('\n第三章', chapter_start + 10)
+    if chapter_end < 0:
+        chapter_end = len(text)
+
+    section_text = text[chapter_start:chapter_end]
+    print(f"[extract_project_info] 项目概况区域: 位置 {chapter_start} ~ {chapter_end} ({len(section_text)} 字)")
+
+    # ── 3. 字段提取（支持（1）前缀的格式） ──────────────────────────────
+    def extract_value(search_text: str, keyword: str) -> str:
+        """支持（1）项目名称：xxx 格式，也支持项目名称：xxx"""
+        for line in search_text.split('\n'):
+            if keyword not in line:
+                continue
+            idx = line.find(keyword) + len(keyword)
+            rest = line[idx:].strip()
+            # 去掉开头的冒号/：/空格/图
+            rest = re.sub(r'^[：:\s图（）()]+', '', rest)
+            # 截取到第一个标点符号为止，但允许顿号和斜杠（用于数字、单位）
+            m = re.match(r'([^，。、；；\n（）()·]+(?:[㎡m³m3\d][^\s，。、；；\n（）()]*)?)', rest)
+            if m:
+                val = m.group(1).strip()
+                val = re.sub(r'[。\s]+$', '', val)
+                return val
+        return ""
+
+    info["project_name"] = extract_value(section_text, "项目名称：")
+    info["company"] = extract_value(section_text, "建设单位：")
+    info["construction_nature"] = extract_value(section_text, "项目性质：")
+    info["location"] = extract_value(section_text, "项目选址：")
+    if not info["location"]:
+        info["location"] = extract_value(section_text, "建设地点：")
+
+    # 环评类别
+    eval_lv = extract_value(section_text, "环评类别：")
+    if not eval_lv:
+        if '报告书' in text[:3000]:
+            eval_lv = "环境影响评价报告书"
+        elif '报告表' in text[:3000]:
+            eval_lv = "环境影响评价报告表"
+    info["evaluation_level"] = eval_lv
+
+    # 投资：全文搜索"项目投资"行
+    for line in section_text.split('\n'):
+        if '项目投资：' in line or '项目投资为' in line:
+            # 格式：项目投资为400万元，环保投资为400万元
+            m = re.search(r'项目投资[为：]?\s*([0-9万亿元]+万)', line)
+            if m:
+                info["total_investment"] = m.group(1)
+            m2 = re.search(r'环保投资[为：]?\s*([0-9万亿元]+万)', line)
+            if m2:
+                info["environmental_investment"] = m2.group(1)
+            break
+    # fallback：全文搜"总投资"（避开目录区）
+    if not info["total_investment"]:
+        idx_total = text.find('总投资', 5000)
+        if idx_total >= 0:
+            line = text[max(0, idx_total-20):idx_total+50]
+            m = re.search(r'([0-9]+万)', line)
+            if m:
+                info["total_investment"] = m.group(1)
+    if not info["environmental_investment"]:
+        idx_env = text.find('环保投资', 5000)
+        if idx_env >= 0:
+            line = text[max(0, idx_env-20):idx_env+50]
+            m = re.search(r'([0-9]+万)', line)
+            if m:
+                info["environmental_investment"] = m.group(1)
+
+    # 建设内容和规模
+    # 优先从概述区域（工业废水集中处理系统段落，位置2200-2400）提取
+    overview_start = text.find('工业废水集中处理系统', 0, 30000)
+    if overview_start < 0:
+        overview_start = 0
+    overview_end = text.find('\n第一章', overview_start)
+    if overview_end < 0:
+        overview_end = overview_start + 5000
+    overview_text = text[overview_start:overview_end]
+
+    # 从概述区域提取
+    for line in overview_text.split('\n'):
+        if '处理规模为' in line or '50m³' in line or '50m3' in line:
+            # 格式：处理规模为50m³/d，占地面积为290㎡。工艺流程：...
+            m = re.search(r'([0-9m³/d／/平方㎡m2m²·]+[^。\n]*)', line)
+            if m:
+                info["construction_content_scale"] = m.group(1).strip()
+                break
+            # fallback：直接找包含数字和m³/d的行
+            m2 = re.search(r'([0-9m³/d／/平方㎡m2m²·]+[^\n]*)', line)
+            if m2:
+                info["construction_content_scale"] = m2.group(1).strip()
+
+    # fallback：从2.2 项目建设内容区域（当前逻辑）
+    if not info["construction_content_scale"]:
+        ch2_start = section_text.find('2.2')
+        ch2_end = section_text.find('\n2.3', ch2_start) if ch2_start >= 0 else -1
+        if ch2_end < 0:
+            ch2_end = section_text.find('\n第三章', ch2_start) if ch2_start >= 0 else -1
+        if ch2_start >= 0 and ch2_end > ch2_start:
+            content_text = section_text[ch2_start:ch2_end]
+            for line in content_text.split('\n'):
+                if '设计处理规模' in line or '处理规模' in line:
+                    m = re.search(r'处理规模[为：\s]*([0-9m³/d／/平方㎡m2]+[^\n]{0,80})', line)
+                    if m:
+                        val = m.group(1).strip()
+                        val = val.split('。')[0]   # 去掉"工艺流程"之后的内容
+                        info["construction_content_scale"] = val
+                        break
+
+    # ── 4. 表格：污染物数据 ────────────────────────────────────────────
+    if not tables:
+        tables = []
+
+    # 3.1 废水污染物
+    ww_tables = extract_tables_by_keyword(tables, ['污染因子', '进水浓度'])
+    for ww_t in ww_tables:
+        rows = ww_t.get('data', [])
+        if len(rows) < 3:
+            continue
+        header = rows[0]
+        col_factor = _find_col_by_keyword(header, ['污染因子'])
+        col_in = _find_col_by_keyword(header, ['进水'])
+        col_day = _find_col_by_keyword(header, ['日排放', '日产生'])
+        col_year = _find_col_by_keyword(header, ['年排放', '年产生'])
+        if col_factor < 0:
+            continue
+        for row in rows[1:]:
+            if len(row) <= col_factor:
+                continue
+            factor = _get_cell_str(row[col_factor])
+            factor = factor.strip()
+            if not factor or factor in ['水量', '废水量', '合计', '序号', '表', '项目']:
+                continue
+            in_val = _get_cell_str(row[col_in]) if col_in >= 0 and col_in < len(row) else ''
+            day_val = _get_cell_str(row[col_day]) if col_day >= 0 and col_day < len(row) else ''
+            year_val = _get_cell_str(row[col_year]) if col_year >= 0 and col_year < len(row) else ''
+            if not any(re.search(r'\d', v) for v in [in_val, day_val, year_val]):
+                continue
+            info["wastewater_pollutants"].append({
+                "因子": factor,
+                "进水浓度(mg/L)": in_val,
+                "日排放量(kg/d)": day_val,
+                "年排放量(t/a)": year_val,
+            })
+
+    # 3.2 废气污染物
+    ex_tables = extract_tables_by_keyword(tables, ['NH3', '产生量', 't/a'])
+    for ex_t in ex_tables:
+        rows = ex_t.get('data', [])
+        if len(rows) < 3:
+            continue
+        header = rows[0]
+        col_factor = _find_col_by_keyword(header, ['NH3', 'H2S', '非甲烷总烃', '污染物', '污染成分'])
+        col_gen = _find_col_by_keyword(header, ['产生量'])
+        col_emit = _find_col_by_keyword(header, ['有组织', '排放量', '排放'])
+        if col_factor < 0:
+            col_factor = 0
+        seen = set()
+        for row in rows[1:]:
+            if len(row) <= col_factor:
+                continue
+            factor_raw = row[col_factor]
+            factor = _get_cell_str(factor_raw)
+            if not factor or factor in ['产排情况', '序号', '排放源', '有组织', '无组织', '类别', '执行标准']:
+                continue
+            if factor in seen:
+                continue
+            gen_val = _get_cell_str(row[col_gen]) if col_gen >= 0 and col_gen < len(row) else ''
+            emit_val = _get_cell_str(row[col_emit]) if col_emit >= 0 and col_emit < len(row) else ''
+            if gen_val or emit_val:
+                seen.add(factor)
+                info["exhaust_gas_pollutants"].append({
+                    "因子": factor,
+                    "年产生量(t/a)": gen_val,
+                    "排放量(t/a)": emit_val,
+                })
+
+    # 3.3 噪声
+    noise_tables = extract_tables_by_keyword(tables, ['噪声', 'dB'], min_rows=3)
+    for nt in noise_tables:
+        rows = nt.get('data', [])
+        if len(rows) < 3:
+            continue
+        header = rows[0]
+        col_name = _find_col_by_keyword(header, ['名称', '声源', '设备'])
+        col_db = _find_col_by_keyword(header, ['dB', '声压', '源强'])
+        if col_name < 0:
+            col_name = 0
+        if col_db < 0:
+            col_db = 2
+        for row in rows[2:]:
+            if len(row) <= max(col_name, col_db):
+                continue
+            name = _get_cell_str(row[col_name])
+            db = _get_cell_str(row[col_db])
+            if name and name not in ['序号', ''] and ('dB' in db or re.search(r'\d', db)):
+                info["noise_sources"].append({
+                    "名称": name,
+                    "声压级(dB(A))": db,
+                })
+
+    # 3.4 危险废物
+    hw_tables = extract_tables_by_keyword(tables, ['危险废物', '产生量', 't/a'])
+    for ht in hw_tables:
+        rows = ht.get('data', [])
+        if len(rows) < 2:
+            continue
+        header = rows[0]
+        col_name = _find_col_by_keyword(header, ['名称'])
+        col_code = _find_col_by_keyword(header, ['代码', '类别'])
+        col_amount = _find_col_by_keyword(header, ['产生量', '排放量'])
+        if col_name < 0:
+            continue
+        for row in rows[1:]:
+            if len(row) <= col_name:
+                continue
+            name = _get_cell_str(row[col_name])
+            if not name or name in ['序号', '合计', '类别']:
+                continue
+            code = _get_cell_str(row[col_code]) if col_code >= 0 and col_code < len(row) else ''
+            amount = ''
+            if col_amount >= 0 and col_amount < len(row):
+                amount_raw = row[col_amount]
+                amount = _get_cell_str(amount_raw)
+            if not re.match(r'^[\d.]+$', amount) and col_amount < 0:
+                for cell in row:
+                    cell_str = _get_cell_str(cell)
+                    if re.match(r'^[\d.]+$', cell_str) and 0 < float(cell_str) < 10000:
+                        amount = cell_str.strip()
+                        break
+            if amount:
+                info["hazardous_waste"].append({
+                    "名称": name,
+                    "代码": code,
+                    "产生量(t/a)": amount,
+                })
+
+    return info
+
+
+def splitChapters(full_text: str) -> Tuple[Dict[str, Dict], str]:
+    """
+    按一级标题拆分章节，同时提取目录（TOC）内容。
+
+    返回 (chapters, toc_content)：
+    - chapters: 章节编号 → {content, line_count}
+    - toc_content: 目录部分原始文本（用于TOC完整性验证）
+
+    章节识别规则（优先级从高到低）：
+    1. 遇到"目录" → 进入目录模式，收集目录内容
+    2. "第X章" → 新章节开始（X支持任意中文数字）
+    3. "概述"等已知独立章节名 → 新章节开始
+    4. "附件/附表/附录"类 → 自动分配空闲编号
+    5. 其他行 → 当前章节内容
+
+    TOC 识别规则：
+    收集"目录"到正文第一章标题之间的所有行。
+    正文第一章判断标准：该章节标题后面跟的不是另一个"第X章"标题，
+    说明这是实际正文内容，而不是目录条目。
+    """
+    chapters = {}
+
+    # 中文数字章节匹配（兼容任意中文数字）
+    chapter_heading_pattern = re.compile(r'^第([一二三四五六七八九十百千万零]+)章\s*(.*)$')
+
+    # 已知独立章节名称（没有"第X章"前缀的）
+    known_standalone_chapters = {
+        '概述', '项目由来', '建设项目由来', '前言', '总论',
+    }
+
+    # 附件类（精确匹配：等于"附件"或以"附件"/"附表"/"附录"开头）
+    attachment_keywords = ['附件', '附表', '附录']
+
+    lines = full_text.split('\n')
+    current_chapter = None
+    current_content = []
+    in_toc = False
+    toc_content = []  # 收集目录内容
+
+    def _is_chapter_heading(text: str) -> bool:
+        """判断一行是否章节标题"""
+        # 子附件项（"附件1："、"附件2："、"附表1："、"附表2："）不是章节标题
+        is_sub_att = re.match(r'^(附件|附表)[\d一二三四五六七八九十]+[：:]', text) is not None
+        return bool(chapter_heading_pattern.match(text)) or \
+               (text in known_standalone_chapters and not is_sub_att) or \
+               (any((text == kw or text.startswith(kw)) for kw in attachment_keywords) and not is_sub_att)
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        line_stripped = line.strip()
+        i += 1
+
+        if not line_stripped:
+            continue
+
+        # 1. 遇到"目录" → 进入目录模式（处理"目   录"中间有空格的情况）
+        stripped_no_space = line_stripped.replace(' ', '').replace('\u3000', '')
+        if stripped_no_space == '目录' or (stripped_no_space.endswith('目录') and len(stripped_no_space) < 10):
+            in_toc = True
+            toc_content.append(line_stripped)
+
+            # 保存上一章（如果有）
+            if current_chapter and current_content:
+                content = '\n'.join(current_content)
+                if content.strip():
+                    chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+                current_content = []
+            continue
+
+        # 2. 如果在目录模式中
+        if in_toc:
+            if _is_chapter_heading(line_stripped):
+                # 查看下一行，判断这是 TOC 条目还是正文第一章
+                # 启发式：跳过空白行，找到下一行
+                j = i
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                next_line = lines[j].strip() if j < len(lines) else ""
+
+                if next_line and _is_chapter_heading(next_line):
+                    # 下一行还是章节标题 → TOC 条目，继续收集
+                    toc_content.append(line_stripped)
+                    continue
+                elif next_line and len(next_line) > 5:
+                    # 下一行是实质内容（正文段落，不是页码）
+                    # → 这是正文第一章或新章节开始，同时也属于 TOC
+                    #
+                    # 判断标准：
+                    # 1. 如果下一行是"数字. "格式（如"1.1 编制依据"）→ 这是节级标题，正文开始，退出
+                    # 2. 如果下一行以"1、"或"一、"开头 → 这是 TOC 条目，继续收集
+                    # 3. 如果下一行包含页码（末尾是罗马数字或单独数字）且无空格分隔 → TOC 条目
+                    # 4. 其他情况 → 正文，退出
+                    # TOC 条目格式：
+                    # - "1、" "2、" 等（阿拉伯数字 + 顿号）
+                    # - "一、" "二、" 等（中文数字 + 顿号）
+                    # - 罗马数字页码（单独"I" "II" "III"等，或末尾带罗马数字）→ TOC
+                    # 排除：节级编号如 "1.1"、"1.1.1"（数字 + 点号 + 数字）→ 正文
+                    next_line_stripped = next_line.strip() if next_line else ''
+
+                    # 提取下一页码（罗马数字或阿拉伯数字）
+                    def extract_trailing_number(s):
+                        m = re.search(r'([IVXLCDM]+|[0-9]+)$', s)
+                        return m.group(1) if m else ''
+
+                    next_page = extract_trailing_number(next_line_stripped)
+
+                    # 判断是否是罗马数字页码
+                    is_roman_page = bool(re.match(r'^[IVXLCDM]+$', next_page))
+
+                    # 判断是否是节级编号（如"1.1"、"1.1.1"）
+                    is_section_number = re.match(r'^\d+(\.\d+)+', next_line_stripped) is not None
+
+                    # 区分 TOC 条目 vs 正文节级内容
+                    is_toc_by_number_prefix = (
+                        next_line_stripped.startswith(('1、', '2、', '3、', '4、', '5、', '6、', '7、', '8、', '9、', '0、')) or
+                        re.match(r'^[\u4e00-\u9fff]+[、.]', next_line_stripped) is not None  # 中文数字+顿号
+                    )
+                    # 判断逻辑：
+                    # - 下一行以 "1、"/"一、" 等开头 → TOC条目，继续
+                    # - 下一行以罗马数字结尾（I, II, III）→ 罗马数字页码，继续
+                    # - 下一行是节级编号（1.1 / 1.2.3）→ 正文，退出
+                    is_toc_continuation = (
+                        is_toc_by_number_prefix or is_roman_page
+                    )
+
+                    if is_toc_continuation and not is_section_number:
+                        # 下一行是 TOC 条目（如"1、"或"一、"）→ 继续收集
+                        toc_content.append(line_stripped)
+                        continue
+                    toc_content.append(line_stripped)
+                    in_toc = False
+                    # 保存上一章（如果有）
+                    if current_chapter and current_content:
+                        content = '\n'.join(current_content)
+                        if content.strip():
+                            chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+                    # 这行作为正文第一章开始
+                    current_chapter = detect_chapter_number(line_stripped)
+                    current_content = [line_stripped]
+                    continue
+                elif not next_line:
+                    # 文档末尾（没有下一行）→ 这是正文第一章，同时也是 TOC 最后一个条目
+                    toc_content.append(line_stripped)
+                    in_toc = False
+                    if current_chapter and current_content:
+                        content = '\n'.join(current_content)
+                        if content.strip():
+                            chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+                    current_chapter = detect_chapter_number(line_stripped)
+                    current_content = [line_stripped]
+                    continue
+                else:
+                    # 下一行是空白或页码类短内容 → 仍属于 TOC
+                    toc_content.append(line_stripped)
+                    continue
+            else:
+                # 非章节标题行（可能是页码等），继续收集到 TOC
+                toc_content.append(line_stripped)
+                continue
+
+        # 3. "第X章" → 新章节开始
+        m = chapter_heading_pattern.match(line_stripped)
+        if m:
+            if current_chapter and current_content:
+                content = '\n'.join(current_content)
+                if content.strip():
+                    chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+                current_content = []
+
+            current_chapter = detect_chapter_number(line_stripped)
+            current_content = [line_stripped]
+            continue
+
+        # 4. 已知独立章节名（如"概述"）
+        if line_stripped in known_standalone_chapters:
+            if current_chapter and current_content:
+                content = '\n'.join(current_content)
+                if content.strip():
+                    chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+                current_content = []
+
+            current_chapter = detect_chapter_number(line_stripped)
+            current_content = [line_stripped]
+            in_toc = False
+            continue
+
+        # 5. 附件类
+        is_att = any((line_stripped == kw or line_stripped.startswith(kw)) for kw in attachment_keywords)
+        if is_att:
+            # 区分主附件标题（"附件与附表"、"附件"、"附表"）和子附件项（"附件1："、"附表1："等）
+            # 主附件标题：创建新的 012 章节（如果还不是012）
+            # 子附件项：全部追加到当前 012 章节内容，不创建新章节
+            is_sub_attachment = re.match(r'^附件[\d一二三四五六七八九十]+[：:、]', line_stripped) is not None
+            is_fubiao_sub = re.match(r'^附表[\d一二三四五六七八九十]+[：:、]', line_stripped) is not None
+            is_main_attachment = line_stripped in ['附件', '附表', '附录', '附件与附表', '附件与附图']
+
+            if is_main_attachment:
+                # 主附件标题 → 保存当前章节，开始 012
+                if current_chapter and current_content:
+                    content = '\n'.join(current_content)
+                    if content.strip():
+                        chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+                    current_content = []
+                current_chapter = '012'
+                current_content = [line_stripped]
+                in_toc = False
+                continue
+            elif is_sub_attachment or is_fubiao_sub:
+                # 子附件项（"附件1："、"附表2："等）→ 追加到当前 012 内容
+                if current_chapter != '012':
+                    # 第一次遇到附件但还不是 012 → 创建 012
+                    if current_chapter and current_content:
+                        content = '\n'.join(current_content)
+                        if content.strip():
+                            chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+                        current_content = []
+                    current_chapter = '012'
+                current_content.append(line_stripped)
+                continue
+            else:
+                # 其他附件类行（如"附件："单独一行，或未知附件格式）→ 追加到 012
+                if current_chapter != '012':
+                    if current_chapter and current_content:
+                        content = '\n'.join(current_content)
+                        if content.strip():
+                            chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+                        current_content = []
+                    current_chapter = '012'
+                current_content.append(line_stripped)
+                in_toc = False
+                continue
+
+        # 6. 其他行 → 当前章节内容
+        current_content.append(line_stripped)
+
+    # 保存最后一章
+    if current_chapter and current_content:
+        content = '\n'.join(current_content)
+        if content.strip():
+            chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+
+    return chapters, '\n'.join(toc_content)
+
+
+def _chinese_to_arabic(cn: str) -> int:
+    """将中文数字转换为阿拉伯数字（支持任意大小）"""
+    cn_nums = {
+        '零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+        '百': 100, '千': 1000, '万': 10000
+    }
+
+    if not cn:
+        return 0
+
+    # 纯个位数
+    if len(cn) == 1:
+        return cn_nums.get(cn, 0)
+
+    result = 0
+    temp = 0
+
+    for char in cn:
+        val = cn_nums.get(char, 0)
+        if val >= 10:
+            if temp == 0:
+                temp = 1
+            result += temp * val
+            temp = 0
+        else:
+            temp = val
+
+    result += temp
+    return result if result > 0 else 0
+
+
+def _make_chapter_num(arabic_num: int) -> str:
+    """将阿拉伯数字转为3位字符串章节编号"""
+    # 001-009: 标准前导章节, 010-099: 标准章节, 100+: 超纲章节
+    return f"{min(arabic_num, 999):03d}"
+
+
+# 标准章节名称 → 标准编号（用于判断是否超纲）
+STANDARD_CHAPTER_NAMES = {
+    '概述': '000', '总则': '002', '项目概况': '003', '工程分析': '004',
+    '环境现状': '005', '现状调查': '005', '环境影响预测': '006',
+    '环境保护措施': '007', '环保措施': '007', '环境风险': '008',
+    '经济损益': '009', '环境管理': '010', '监测计划': '010',
+    '结论': '011', '附件': '012', '附表': '012', '附录': '012',
+}
+
+
+def detect_chapter_number(title: str) -> str:
+    """
+    根据标题检测章节编号。
+
+    规则（优先级从高到低）：
+    1. 附件/附表/附录类 → 012
+    2. "第X章" → 动态计算X对应的数字 → 转为3位字符串
+       （支持十一、十二、二十、二十一等任意中文数字）
+    3. "第X节" → 动态计算X，对应到所属章
+    4. "概述"等无前缀标准章节名 → 001
+    5. 其他未知章节 → 999
+    """
+    t = title.strip()
+
+    # 1. 附件类 → 012（必须是独立词，不是其他词的子串）
+    # 使用 \b 词边界匹配，或直接检查是否等于或开头是"附件"/"附表"/"附录"
+    attachment_prefixes = ['附件', '附表', '附录']
+    is_attachment = False
+    for kw in attachment_prefixes:
+        if t == kw or t.startswith(kw):
+            is_attachment = True
+            break
+    if is_attachment:
+        return '012'
+
+    # 2. "第X章" → 动态计算
+    m = re.match(r'^第([一二三四五六七八九十百千万零]+)章', t)
+    if m:
+        num = _chinese_to_arabic(m.group(1))
+        return _make_chapter_num(num)
+
+    # 3. "第X节" → 归到对应章节
+    m = re.match(r'^第([一二三四五六七八九十百千万零]+)节', t)
+    if m:
+        num = _chinese_to_arabic(m.group(1))
+        return _make_chapter_num(num)
+
+    # 4. 无前缀标准章节名
+    for name, std_num in STANDARD_CHAPTER_NAMES.items():
+        if name in t:
+            return std_num
+
+    # 5. 未知章节
+    return '999'
+
+
+def save_output(output_dir: str, project_name: str, full_text: str,
+                tables: List[Dict], project_info: Dict, chapters: Dict[str, Dict],
+                toc_content: str = "") -> str:
+    """保存输出文件"""
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # 文件名前缀
+    prefix = re.sub(r'[^\w\u4e00-\u9fff-]', '_', project_name)[:50]
+
+    # 1. 保存完整文本
+    full_text_file = output_path / f"{prefix}_full_text.txt"
+    full_text_file.write_text(full_text, encoding='utf-8')
+
+    # 2. 保存表格数据
+    tables_file = output_path / f"{prefix}_tables.json"
+    tables_file.write_text(json.dumps(tables, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    # 3. 保存目录（TOC）
+    if toc_content:
+        toc_file = output_path / "toc.txt"
+        toc_file.write_text(toc_content, encoding='utf-8')
+
+    # 4. 保存项目信息
+    info_file = output_path / "项目信息.json"
+    info_file.write_text(json.dumps(project_info, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    # 5. 保存各章节
+    chapters_dir = output_path / "chapters"
+    chapters_dir.mkdir(exist_ok=True)
+
+    for num, data in sorted(chapters.items()):
+        chapter_file = chapters_dir / f"chapter_{num}.txt"
+        chapter_file.write_text(data["content"], encoding='utf-8')
+
+    return str(output_path)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='环评报告书内容提取工具')
+    parser.add_argument('-n', '--project', required=True, help='项目名称')
+    parser.add_argument('-d', '--docx', required=True, help='报告书文件路径（DOCX/DOC/PDF）')
+    parser.add_argument('-o', '--output', required=True, help='输出目录')
+    parser.add_argument('--session', default='review_001', help='会话标识')
+
+    args = parser.parse_args()
+
+    # 验证文件
+    doc_path = Path(args.docx)
+    if not doc_path.exists():
+        print(f"错误: 文件不存在: {doc_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # 创建输出目录
+    output_dir = Path(args.output) / args.project / args.session
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"正在提取文件: {doc_path}")
+    print(f"输出目录: {output_dir}")
+
+    try:
+        # 根据文件类型提取
+        suffix = doc_path.suffix.lower()
+
+        if suffix == '.pdf':
+            print("提取PDF文件...")
+            full_text, tables, project_info = extract_from_pdf(str(doc_path))
+        elif suffix in ['.docx', '.doc']:
+            # DOC需要先转换
+            if suffix == '.doc':
+                print("转换DOC为DOCX...")
+                docx_path = convert_doc_to_docx(str(doc_path))
+            else:
+                docx_path = str(doc_path)
+
+            print("提取DOCX文件...")
+            full_text, tables, project_info = extract_from_docx(docx_path)
+        else:
+            print(f"错误: 不支持的文件格式: {suffix}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"提取完成: {len(full_text)} 字符, {len(tables)} 个表格")
+
+        # 章节分割
+        print("正在分割章节...")
+        chapters, toc_content = splitChapters(full_text)
+        print(f"分割完成: {len(chapters)} 个章节")
+
+        # 保存输出
+        print("保存输出文件...")
+        output_path = save_output(
+            str(output_dir / "extract"),
+            args.project,
+            full_text,
+            tables,
+            project_info,
+            chapters,
+            toc_content
+        )
+
+        print(f"\n提取完成！")
+        print(f"输出目录: {output_path}")
+        print(f"\n项目信息:")
+        print(f"  项目名称: {project_info.get('project_name', '未知')}")
+        print(f"  建设单位: {project_info.get('company', '未知')}")
+        print(f"  评价等级: {project_info.get('evaluation_level', '未知')}")
+        print(f"\n章节列表:")
+        for num in sorted(chapters.keys()):
+            print(f"  {num}: {len(chapters[num]['content'])} 字符")
+
+    except Exception as e:
+        print(f"错误: {str(e)}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

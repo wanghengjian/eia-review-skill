@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""
+环评报告书审核规则加载器
+
+直接对 Markdown 原文做关键词匹配，把命中的规则块文本返回给 LLM。
+规则文件：reference/审核规则库.md
+"""
+
+import re
+from pathlib import Path
+
+
+# 章节关键词映射（chapter_num → 关键词列表）
+# 用于匹配"适用章节"中包含这些关键词的规则
+CHAPTER_KEYWORDS = {
+    "000": ["概述", "项目由来", "建设项目由来"],
+    "001": ["概述", "总则", "评价标准", "评价等级", "环境功能区划"],
+    "002": ["项目概况", "工程组成", "原辅材料", "设备清单"],
+    "003": ["工程分析", "工艺流程", "污染源源强", "物料平衡", "水平衡"],
+    "004": ["环境现状", "现状调查", "环境监测", "监测数据"],
+    "005": ["影响预测", "预测评价", "达标分析", "防护距离"],
+    "006": ["环保措施", "污染防治", "可行性论证", "处理工艺"],
+    "007": ["环境风险", "风险评价", "风险防范", "应急预案", "事故"],
+    "008": ["经济损益", "环境经济", "效益分析"],
+    "009": ["环境管理", "监测计划", "竣工验收", "自行监测"],
+    "010": ["合理性分析", "选址合理", "产业政策", "规划符合性", "选址", "结论"],
+    "011": ["选址合理性", "选址分析"],
+    "012": ["附件", "附表", "附录", "附件与附表"],
+}
+
+# 规则库文件路径
+RULES_FILE = Path(__file__).parent.parent.parent / "reference" / "审核规则库.md"
+
+# 缓存已加载的规则文本
+_rules_text_cache = None
+
+
+def _load_rules_text() -> str:
+    """加载规则库原文（带缓存）"""
+    global _rules_text_cache
+    if _rules_text_cache is None:
+        if not RULES_FILE.exists():
+            raise FileNotFoundError(f"规则库文件不存在: {RULES_FILE}")
+        _rules_text_cache = RULES_FILE.read_text(encoding="utf-8")
+    return _rules_text_cache
+
+
+def _split_rule_blocks(text: str) -> list:
+    """把 Markdown 切成独立的规则块（按 ### 标题分割）"""
+    # 去掉文件头部的元信息（生成时间、---等）
+    lines = text.split('\n')
+    # 找到第一个 ## 标题作为实际内容起点
+    start_idx = 0
+    for i, line in enumerate(lines):
+        if line.startswith('##'):
+            start_idx = i
+            break
+    content = '\n'.join(lines[start_idx:])
+
+    # 按 ### 分割成块
+    blocks = re.split(r'\n(?=### )', content)
+    return [b.strip() for b in blocks if b.strip()]
+
+
+def _block_applicable_to_chapter(block: str, keywords: list) -> bool:
+    """判断规则块是否适用于指定章节（通过关键词匹配）"""
+    # 提取"适用章节"那行
+    applicable_lines = []
+    for line in block.split('\n'):
+        if '适用章节' in line:
+            applicable_lines.append(line)
+        elif line.strip().startswith('- **适用章节'):
+            applicable_lines.append(line)
+
+    # 如果规则没有"适用章节"字段，认为通用（适用于所有章节）
+    if not applicable_lines:
+        return True
+
+    # 在适用章节中匹配任一关键词
+    scope_text = ' '.join(applicable_lines)
+    for kw in keywords:
+        if kw in scope_text:
+            return True
+    return False
+
+
+def get_rules_text_for_chapter(chapter_num: str) -> str:
+    """
+    获取指定章节适用的规则原文（Markdown 文本片段）。
+
+    逻辑：
+    1. 加载规则库全文
+    2. 按 ### 切成独立规则块
+    3. 用章节关键词匹配"适用章节"字段
+    4. 返回命中的规则块文本（无结构，纯文本）
+    """
+    keywords = CHAPTER_KEYWORDS.get(chapter_num, [])
+    if not keywords:
+        return ""
+
+    text = _load_rules_text()
+    blocks = _split_rule_blocks(text)
+    matched = []
+
+    for block in blocks:
+        # 跳过章节关键词定义块（格式为 "### NNN. 章节名" + "**匹配关键词**：..."）
+        if '**匹配关键词**' in block:
+            continue
+        if _block_applicable_to_chapter(block, keywords):
+            matched.append(block)
+
+    return '\n---\n'.join(matched)
+
+
+def get_rules_loader():
+    """兼容旧接口，返回规则加载器（现在只是规则文本）"""
+    return RulesTextLoader()
+
+
+class RulesTextLoader:
+    """简化版加载器：只提供文本，不解析结构"""
+
+    def get_rules_for_chapter(self, chapter_num: str) -> str:
+        """返回适用规则的 Markdown 原文"""
+        return get_rules_text_for_chapter(chapter_num)
+
+    def get_all_rules(self) -> str:
+        """返回规则库全文"""
+        return _load_rules_text()
+
+    def get_chapter_keyword(self, chapter_num: str) -> list:
+        """返回章节关键词"""
+        return CHAPTER_KEYWORDS.get(chapter_num, [])
+
+
+# 兼容旧接口别名（放在类定义之后）
+ReviewRulesLoader = RulesTextLoader
+
+
+# 单例（兼容旧代码）
+_rules_loader = None
+
+
+def _get_rules_loader() -> RulesTextLoader:
+    global _rules_loader
+    if _rules_loader is None:
+        _rules_loader = RulesTextLoader()
+    return _rules_loader
+
+
+if __name__ == "__main__":
+    # 测试
+    loader = RulesTextLoader()
+    print(f"规则库加载成功，共 {len(CHAPTER_KEYWORDS)} 个章节")
+
+    for ch in ["000", "003", "006"]:
+        text = loader.get_rules_for_chapter(ch)
+        # 统计规则块数
+        blocks = [b for b in text.split('---') if b.strip()]
+        kws = loader.get_chapter_keyword(ch)
+        print(f"\n章节 {ch} (关键词: {kws}) → {len(blocks)} 条规则")
+        # 打印规则名
+        for block in blocks[:3]:
+            m = re.search(r'###\s+(.+)', block)
+            if m:
+                print(f"  - {m.group(1)}")
