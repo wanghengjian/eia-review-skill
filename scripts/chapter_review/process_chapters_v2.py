@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "utils"))
 from review_rules_loader import ReviewRulesLoader, get_rules_loader
 from review_by_llm import EIA_LLMReview
 from chunker import TextChunker, create_chunks
+from pre_scan import generate_pre_scan_report
 
 
 # 并发配置
@@ -41,7 +42,8 @@ def review_single_chapter(
     llm_reviewer: EIA_LLMReview,
     chunker: TextChunker,
     tables_data: List[Dict] = None,
-    previous_context: str = ""
+    previous_context: str = "",
+    pre_scan_injection: str = ""
 ) -> Dict:
     """
     审查单个章节
@@ -105,7 +107,8 @@ def review_single_chapter(
             # 不需要分块，直接审查
             findings = _review_content(
                 chapter_num, chapter_name, content, rules_text,
-                tables_text, previous_context, llm_reviewer
+                tables_text, previous_context, llm_reviewer,
+                pre_scan_injection
             )
             result["findings"] = findings
             result["chunks_reviewed"] = 1
@@ -119,7 +122,8 @@ def review_single_chapter(
                 chunk_context = last_context if i > 0 else previous_context
                 findings = _review_content(
                     chapter_num, chapter_name, chunk.content, rules_text,
-                    tables_text, chunk_context, llm_reviewer
+                    tables_text, chunk_context, llm_reviewer,
+                    pre_scan_injection
                 )
                 all_findings.extend(findings)
                 last_context = chunk.content[-500:] if len(chunk.content) > 500 else chunk.content
@@ -142,13 +146,15 @@ def _review_content(
     rules_text: str,
     tables_text: str,
     context: str,
-    llm_reviewer: EIA_LLMReview
+    llm_reviewer: EIA_LLMReview,
+    pre_scan_injection: str = ""
 ) -> List[Dict]:
     """审查一块内容
 
     Args:
         tables_text: 已格式化好的完整表格文本（由 process_chapter 调一次传入，
                      不在此函数内重复调 _find_relevant_tables）
+        pre_scan_injection: 预扫描结果注入文本
     """
     try:
         review_result = llm_reviewer.review_chapter(
@@ -157,7 +163,8 @@ def _review_content(
             chapter_content=content,
             rules_text=rules_text,
             tables=tables_text,
-            context=context
+            context=context,
+            pre_scan_injection=pre_scan_injection
         )
         return review_result.get("findings", [])
     except Exception as e:
@@ -323,6 +330,20 @@ async def review_chapters_async(
     previous_context = ""
     chapter_results = {}
 
+    # 预扫描（机械检查层，在LLM审查之前执行）
+    print("  [预扫描] 表格编号索引 + 数值验算...")
+    pre_report = generate_pre_scan_report(extract_dir)
+    pre_injection = pre_report.get("llm_injection", "")
+    pre_scan_summary = f"预扫描完成：{pre_report.get('chapter_count', 0)}章节，{pre_report.get('table_count', 0)}个表格编号，{pre_report.get('numeric_contradictions', 0)}条数值矛盾"
+    print(f"  {pre_scan_summary}")
+
+    # 保存预扫描结果供回溯分析
+    output_dir.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    pre_scan_file = output_dir / "pre_scan_report.json"
+    pre_scan_file.write_text(_json.dumps(pre_report, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f"  [预扫描] 报告已保存: {pre_scan_file}")
+
     print(f"开始审查 {len(chapter_nums)} 个章节（{concurrent}并发）...")
 
     # 创建线程池执行器
@@ -341,7 +362,7 @@ async def review_chapters_async(
             future = executor.submit(
                 review_single_chapter,
                 num, chapters_dir, rules_loader, llm_reviewer, chunker,
-                tables_data, previous_context
+                tables_data, previous_context, pre_injection
             )
             futures[future] = num
 

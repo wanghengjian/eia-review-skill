@@ -39,8 +39,8 @@ class EIA_LLMReview:
             api_key: API密钥
             base_url: API基础URL
             model: 模型名称
-            timeout: 超时时间（秒）
-            prompt_output_dir: LLM prompt 输出目录（设为路径则每次调用都保存prompt到文件，None则不保存）
+            timeout: 超时时间(秒)
+            prompt_output_dir: LLM prompt 输出目录(设为路径则每次调用都保存prompt到文件，None则不保存)
         """
         self.api_key = api_key or os.environ.get("MINIMAX_API_KEY", "")
         self.base_url = base_url
@@ -55,7 +55,8 @@ class EIA_LLMReview:
         chapter_content: str,
         rules_text: str = "",
         tables: str = "",
-        context: str = ""
+        context: str = "",
+        pre_scan_injection: str = ""
     ) -> Dict[str, Any]:
         """
         审查单个章节
@@ -64,19 +65,18 @@ class EIA_LLMReview:
             chapter_num: 章节编号
             chapter_name: 章节名称
             chapter_content: 章节内容
-            rules_text: 适用规则原文（Markdown文本片段）
+            rules_text: 适用规则原文(Markdown文本片段)
             tables: 相关表格数据
-            context: 上下文（前一章节的末尾内容）
-
-        Returns:
-            审查结果JSON
+            context: 上下文(前一章节的末尾内容)
+            pre_scan_injection: 预扫描结果文本(表格索引、数值验算等)
         """
         # 构建提示词
         prompt = self._build_chapter_review_prompt(
-            chapter_num, chapter_name, chapter_content, rules_text, tables, context
+            chapter_num, chapter_name, chapter_content, rules_text, tables, context,
+            pre_scan_injection
         )
 
-        # 保存prompt到文件（如果配置了输出目录）
+        # 保存prompt到文件(如果配置了输出目录)
         if self.prompt_output_dir:
             self._save_prompt(chapter_num, chapter_name, prompt)
 
@@ -92,7 +92,7 @@ class EIA_LLMReview:
         project_info: Dict[str, str]
     ) -> Dict[str, Any]:
         """
-        全局审查（一次性LLM调用）
+        全局审查(一次性LLM调用)
 
         Args:
             full_text: 完整文本
@@ -112,61 +112,64 @@ class EIA_LLMReview:
         chapter_content: str,
         rules_text: str,
         tables: str,
-        context: str
+        context: str,
+        pre_scan_injection: str = ""
     ) -> str:
-        """构建章节审查提示词（优化版）"""
+        """构建章节审查提示词(优化版)"""
 
         prompt = f"""你是一位资深的环评技术审查专家。请严格按照以下要求对环评报告书章节进行技术审查。
 
 ## 角色与任务
-- 角色：熟悉环评法律法规、技术导则（HJ系列）、产业政策、规划符合性要求的资深专家
+- 角色：熟悉环评法律法规、技术导则(HJ系列)、产业政策、规划符合性要求的资深专家
 - 任务：根据给定的【章节内容】、【相关表格】和【审查规则库】，逐条分析是否存在问题
 - 规则适用原则：仅审查与本章节内容直接相关的规则。若不相关，在分析中说明跳过原因
 
-## 审查规则库（Markdown原文）
-{rules_text if rules_text else "（无特定规则，请进行通用技术审查）"}
+{pre_scan_injection if pre_scan_injection else ''}
+
+## 审查规则库(Markdown原文)
+{rules_text if rules_text else "(无特定规则，请进行通用技术审查)"}
 
 ## 输入信息
 ### 章节信息
 - 章节编号：{chapter_num}
 - 章节名称：{chapter_name}
 
-### 上下文（前一章节末尾，用于保持连续性）
-{context if context else "（无）"}
+### 上下文(前一章节末尾，用于保持连续性)
+{context if context else "(无)"}
 
 ### 章节内容
 {chapter_content}
 
-### 相关表格（如有）
-{tables if tables else "（无表格数据）"}
+### 相关表格(如有)
+{tables if tables else "(无表格数据)"}
 
 ## 输出要求
-1. **严格输出 JSON 格式**，不要包含任何额外文字、注释或 markdown 代码块标记（如 ``` json）
+1. **严格输出 JSON 格式**，不要包含任何额外文字、注释或 markdown 代码块标记(如 ``` json)
 2. **字段说明**：
    - `chapter_num`：章节编号
    - `chapter_name`：章节名称
    - `findings`：问题列表，每条问题包含：
-     - `id`：规则编号 + 序号（如"B-001-1"，无则留空）
-     - `title`：问题标题（10-20字）
-     - `severity`：high / medium / low（与规则类别对应：B类→high，C类→medium，A类→low）
-     - `confidence`：high / medium / low（高=有文字证据支撑）
-     - `location`：问题所在位置（精确到章节小标题或段落首句）
-     - `description`：问题描述（50-150字，说明违反了什么、缺了什么）
-     - `rule_id`：对应规则编号（无则填"通用"）
-     - `rule_name`：对应规则名称（无则填"通用审核"）
-     - `suggestion`：修改建议（50-150字）
-   - `summary`：本章审查总结（100字以内）
+     - `id`：规则编号 + 序号(如"B-001-1"，无则留空)
+     - `title`：问题标题(10-20字)
+     - `severity`：high / medium / low(与规则类别对应：B类→high，C类→medium，A类→low)
+     - `confidence`：high / medium / low(高=有文字证据支撑)
+     - `location`：问题所在位置(精确到章节小标题或段落首句)
+     - `description`：问题描述(50-150字，说明违反了什么、缺了什么)
+     - `rule_id`：对应规则编号(无则填"通用")
+     - `rule_name`：对应规则名称(无则填"通用审核")
+     - `suggestion`：修改建议(50-150字)
+   - `summary`：本章审查总结(100字以内)
    - `has_major_issues`：存在 high 缺陷时为 true，否则 false
 3. **若无问题**：`findings` 数组为空，`has_major_issues` 为 false
 4. **审核依据**：必须引用章节原文或表格中的具体内容作为证据
 
-## 审查步骤（思维链）
+## 审查步骤(思维链)
 请按以下步骤思考并输出：
-1. 阅读章节内容，提取关键信息（项目类型、选址、规模、环评类别判定、三线一单分析等）
+1. 阅读章节内容，提取关键信息(项目类型、选址、规模、环评类别判定、三线一单分析等)
 2. 解析输入的规则库，提取所有规则及其编号、名称、情形、审核步骤
 3. 逐条判断每条规则是否适用于本章节：
    - 若适用，按该规则的审核步骤逐一检查
-   - 若不适用，跳过（内部记录，不输出）
+   - 若不适用，跳过(内部记录，不输出)
 4. 对发现的问题，按输出格式记录，确保有充分证据
 5. 汇总 summary，判断 has_major_issues
 
@@ -197,7 +200,7 @@ class EIA_LLMReview:
 
 ### 1. 章节完整性
 - 是否按照HJ 2.1-2016规定的12个标准章节编制
-- 各章节是否有实质性内容（非仅有标题）
+- 各章节是否有实质性内容(非仅有标题)
 
 ### 2. 法规标准引用
 - 是否正确引用适用的大气/地表水/声/土壤等标准
@@ -219,7 +222,7 @@ class EIA_LLMReview:
 - 污染防治措施无法确保达标排放
 - 基础资料明显不实、内容重大缺陷
 
-## 报告书文本（部分，选取关键章节）
+## 报告书文本(部分，选取关键章节)
 ---
 {full_text[:20000]}
 ---
@@ -254,7 +257,7 @@ class EIA_LLMReview:
         return prompt
 
     def _save_prompt(self, chapter_num: str, chapter_name: str, prompt: str):
-        """保存LLM prompt到文件（用于回溯调试）"""
+        """保存LLM prompt到文件(用于回溯调试)"""
         os.makedirs(self.prompt_output_dir, exist_ok=True)
         # 文件名：chapter_{编号}_{章节名}_{时间戳}.txt
         safe_name = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in chapter_name)
@@ -303,7 +306,7 @@ class EIA_LLMReview:
             )
 
         except requests.exceptions.Timeout:
-            raise TimeoutError(f"LLM调用超时（{self.timeout}秒）")
+            raise TimeoutError(f"LLM调用超时({self.timeout}秒)")
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"LLM调用失败: {str(e)}")
 
@@ -348,7 +351,7 @@ class EIA_LLMReview:
                 "chapter_num": chapter_num,
                 "chapter_name": chapter_name,
                 "findings": [],
-                "summary": f"审查完成（解析响应失败）: {str(e)}",
+                "summary": f"审查完成(解析响应失败): {str(e)}",
                 "has_major_issues": False,
                 "parse_error": str(e),
                 "raw_response": response.content[:500]
@@ -388,7 +391,7 @@ class EIA_LLMReview:
                 "overall_findings": [],
                 "chapter_completeness": {"status": "unknown"},
                 "major_issues_warning": False,
-                "recommendation": f"全局审查完成（解析响应失败）",
+                "recommendation": f"全局审查完成(解析响应失败)",
                 "parse_error": str(e),
                 "raw_response": response.content[:500]
             }
