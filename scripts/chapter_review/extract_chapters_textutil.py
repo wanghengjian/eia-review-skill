@@ -1042,6 +1042,18 @@ def save_output(output_dir: str, project_name: str, full_text: str,
         chapter_file = chapters_dir / f"chapter_{num}.txt"
         chapter_file.write_text(data["content"], encoding='utf-8')
 
+    # 6. 保存章节映射表（章节编号→标题，方便排查章节分配问题）
+    chapter_mapping = {}
+    for num, data in sorted(chapters.items()):
+        first_line = data["content"].split('\n')[0].strip() if data["content"] else ""
+        chapter_mapping[num] = {
+            "title": first_line,
+            "line_count": data.get("line_count", 0),
+            "char_count": len(data["content"])
+        }
+    mapping_file = output_path / "chapter_mapping.json"
+    mapping_file.write_text(json.dumps(chapter_mapping, ensure_ascii=False, indent=2), encoding='utf-8')
+
     return str(output_path)
 
 

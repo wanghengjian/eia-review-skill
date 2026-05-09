@@ -112,9 +112,11 @@ def get_rules_text_for_chapter(chapter_num: str, chapter_name: str) -> str:
     3. 用章节真实标题匹配规则的「适用章节」字段（语义子串匹配）
     4. 返回命中的规则块文本（无结构，纯文本）
     """
+    import os, re as _re
     text = _load_rules_text()
     blocks = _split_rule_blocks(text)
     matched = []
+    debug_info = []
 
     for block in blocks:
         if '**匹配关键词**' in block:
@@ -122,6 +124,16 @@ def get_rules_text_for_chapter(chapter_num: str, chapter_name: str) -> str:
         applicable = _parse_applicable_chapters(block)
         if _chapter_matches_applicable(chapter_name, applicable):
             matched.append(block)
+            # 提取规则ID（仅第一个）
+            rule_ids = _re.findall(r'### ([A-C]-\d+)', block)
+            debug_info.append(f"{rule_ids[0] if rule_ids else '?'}: {applicable}")
+
+    # 调试日志：每次规则匹配时输出到 stderr（可从后端日志看到）
+    debug_msg = (
+        f"[RULES_DEBUG] chapter_num={chapter_num}, chapter_name={chapter_name!r}, "
+        f"total_blocks={len(blocks)}, matched={len(matched)}, rules=[{', '.join(debug_info[:10])}]"
+    )
+    os.write(2, (debug_msg + '\n').encode('utf-8'))
 
     return '\n---\n'.join(matched)
 
