@@ -176,6 +176,7 @@ def extract_from_docx(docx_path: str) -> Tuple[str, List[Dict], Dict]:
     full_text = []
     tables = []
     table_id = 0
+    seen_table_ids = set()  # 用于全量表格去重（body直接表格 vs 嵌套表格 vs AlternateContent）
 
     # 当前章节编号（000=序言）
     # _chapter_base: 遇到第一个有效"第X章"H1 时建立基准（= 章节号），非"第X章"H1 基于基准递增
@@ -184,35 +185,38 @@ def extract_from_docx(docx_path: str) -> Tuple[str, List[Dict], Dict]:
     _chapter_base = None  # type: int | None
     _h1_counter = [0]     # 非"第X章"H1 的递增计数
     _last_detected_ch = '000'  # 上次检测到的新章节号（用于 Normal fallback 校准）
-    # body_children 顶级元素（CT_P/CT_Tbl）与 doc.paragraphs 一一对应：
-    # 顶级段落总数 == len(doc.paragraphs)，每个顶级 CT_P 按顺序对应 doc.paragraphs 的一个元素。
-    # 第一遍：遍历 body_children，建立顶级段落索引→章节号映射
-    # top_para_count = 到当前元素为止已看到的顶级段落数（不含当前元素如果是段落的话）
-    # 记录每个顶级段落索引对应的章节号
-    top_para_count = 0
-    tbl_top_para_indices = []  # 每个表格的顶级段落索引
-    para_idx_to_chapter = {}   # 顶级段落索引 → 当时的章节号
 
     for child in body_children:
         if isinstance(child, CT_P):
-            # 记录：处理此段落之前的章节号（=上一个段落的章节）
-            # 实际上，我们需要记录处理此段落之后的章节（因为段落本身改变章节）
-            # 方案：先处理段落逻辑，得到新的 current_chapter，再记录
-            pass  # 第一遍只建立 tbl_top_para_indices
-        elif isinstance(child, CT_Tbl):
-            tbl_top_para_indices.append(top_para_count)
-
-    # 第二遍：遍历段落获取样式，追踪章节变化，同时记录映射
-    top_para_idx = 0
-
-    for child in body_children:
-        if isinstance(child, CT_P):
-            para = doc.paragraphs[top_para_idx]
-            text = para.text.strip()
-            style_name = para.style.name if para.style else ''
-            top_para_idx += 1
+            para = child  # 直接用 XML 元素，不再从 doc.paragraphs 查
+            text = para.text.strip() if para.text else ''
+            # 样式名从 pPr> pStyle 获取
+            pStyle = para.find('.//w:pPr/w:pStyle', ns)
+            style_name = (pStyle.get(f'{{{ns}}}val') or '') if pStyle is not None else ''
 
             if not text:
+                # 空段落（如只有 AlternateContent 渲染对象、无实际文本的段落）：内联提取内嵌表格
+                for tbl_el in para.findall('.//w:tbl', ns):
+                    if id(tbl_el) not in seen_table_ids:
+                        seen_table_ids.add(id(tbl_el))
+                        table_data = []
+                        for row in tbl_el.findall('.//w:tr', ns):
+                            cells = row.findall('.//w:tc', ns)
+                            row_data = []
+                            for cell in cells:
+                                cell_text = ''.join(
+                                    t.text or '' for t in cell.findall('.//w:t', ns)
+                                ).strip()
+                                row_data.append(cell_text)
+                            table_data.append(row_data)
+                        tables.append({
+                            "table_id": table_id,
+                            "chapter_num": current_chapter,
+                            "data": table_data,
+                            "rows": len(table_data),
+                            "cols": len(table_data[0]) if table_data else 0,
+                        })
+                        table_id += 1
                 continue
 
             is_heading1 = style_name == 'Heading 1'
@@ -300,10 +304,60 @@ def extract_from_docx(docx_path: str) -> Tuple[str, List[Dict], Dict]:
                 full_text.append(text)
 
         elif isinstance(child, CT_Tbl):
-            # 表格：用 lxml 提取数据并标记所属章节
+            # 全量表格提取：body 直接子表格 + 其单元格内的嵌套表格
+            # 去重用 seen_table_ids（处理 AlternateContent: Choice 和 Fallback 指向同一表格对象）
+            def _extract_single_table(tbl_el, chapter_num):
+                """提取一个表格及其所有嵌套子表格，递归继承 chapter_num"""
+                nonlocal table_id
+                if id(tbl_el) in seen_table_ids:
+                    return
+                seen_table_ids.add(id(tbl_el))
+                table_data = []
+                for row in tbl_el.findall('.//w:tr', ns):
+                    cells = row.findall('.//w:tc', ns)
+                    row_data = []
+                    for cell in cells:
+                        cell_text = ''.join(
+                            t.text or '' for t in cell.findall('.//w:t', ns)
+                        ).strip()
+                        row_data.append(cell_text)
+                    table_data.append(row_data)
+                tables.append({
+                    "table_id": table_id,
+                    "chapter_num": chapter_num,
+                    "data": table_data,
+                    "rows": len(table_data),
+                    "cols": len(table_data[0]) if table_data else 0,
+                })
+                table_id += 1
+
+                # 递归提取单元格内的嵌套表格
+                nested_tbls = tbl_el.findall('.//w:tbl', ns)
+                for nested_tbl in nested_tbls:
+                    _extract_single_table(nested_tbl, chapter_num)
+
+            # 处理当前 body 直接子表格（包含所有嵌套在单元格内的表格）
+            _extract_single_table(child, current_chapter)
+
+    full_text_str = '\n\n'.join(full_text)
+
+    # 兜底：扫描所有 remaining 嵌套表格（如嵌在 AlternateContent 内的表格，
+    # 不属于 body 直接子元素，在主循环中未被处理）
+    remaining_tbls = body.findall(f'.//{{{ns}}}tbl')
+    for tbl_el in remaining_tbls:
+        if id(tbl_el) not in seen_table_ids:
+            # 找最近的 H1 标题（向前搜索 full_text）
+            chapter_num = current_chapter
+            # 从 full_text 末尾向前找最近的 [H1:xxx] 作为章节归属
+            h1_matches = list(re.finditer(r'\[H1:([^\]]+)\]', full_text_str))
+            if h1_matches:
+                last_h1 = h1_matches[-1].group(1)
+                ch = detect_chapter_number(last_h1)
+                if ch != '999':
+                    chapter_num = ch
+            seen_table_ids.add(id(tbl_el))
             table_data = []
-            rows = child.findall('.//w:tr', ns)
-            for row in rows:
+            for row in tbl_el.findall('.//w:tr', ns):
                 cells = row.findall('.//w:tc', ns)
                 row_data = []
                 for cell in cells:
@@ -312,17 +366,14 @@ def extract_from_docx(docx_path: str) -> Tuple[str, List[Dict], Dict]:
                     ).strip()
                     row_data.append(cell_text)
                 table_data.append(row_data)
-
             tables.append({
                 "table_id": table_id,
-                "chapter_num": current_chapter,
+                "chapter_num": chapter_num,
                 "data": table_data,
                 "rows": len(table_data),
                 "cols": len(table_data[0]) if table_data else 0,
             })
             table_id += 1
-
-    full_text_str = '\n\n'.join(full_text)
 
     # 提取项目信息
     project_info = extract_project_info(full_text_str, tables)
