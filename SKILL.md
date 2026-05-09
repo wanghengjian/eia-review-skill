@@ -37,7 +37,11 @@ outputs:
 - **HJ 616-2011**《建设项目环境影响技术评估导则》
 - **DB4403/T 548-2024**《环境影响评价技术审查规则》（深圳地标）
 
-**代码仓库（2026-05-13）：** `https://github.com/WangHengjian/eia-review-agent`（private）
+**代码仓库（2026-05-13）：**
+- **项目（后端+前端）**：`https://github.com/WangHengjian/eia-review-agent`（private）
+- **技能本体（规则库+核心代码）**：`https://github.com/WangHengjian/eia-review-skill`（public）
+
+> **注意**：`~/.hermes/skills/eia-quick-review/`（技能本体）**不在 Git 追踪范围**。修改规则或代码后需手动同步到 GitHub 备份。
 
 **审查规则体系（179条主规则 + 23条细则补充）**
 
@@ -69,20 +73,32 @@ outputs:
 
 后端入口：`backend/app/api/reviews.py`（FastAPI BackgroundTasks → `run_review_task_async`）
 
-## 规则库文件路径规范
+## 目录结构（2026-05-13 更新）
+
+**技能目录**：`~/.hermes/skills/eia-quick-review/`（运行时实际读取，**不在 Git**）
+
+```
+~/.hermes/skills/eia-quick-review/
+├── SKILL.md / WORKFLOW.md      # 技能定义
+├── scripts/                    # 核心代码
+│   ├── chapter_review/         # 章节审查、报告生成
+│   ├── utils/                  # 规则加载器(review_rules_loader.py)、分块器
+│   └── generate_rule_keywords.py
+└── reference/                  # ★ 运行时规则库（后端读取这里）
+    ├── 审核规则库.md            # B/C/A类 179条
+    └── 审核规则库-细则补充.md   # S类 23条
+```
+
+**GitHub 双仓库架构**：
+- `eia-review-agent` — 后端+前端项目（含 CI/DB/前端代码）
+- `eia-review-skill` — 技能本体备份（规则库+核心代码）
 
 > ⚠️ **易混淆点**：`main.py` line 88 代码写 `skill_scripts / "reference"`（即 `skills/eia-quick-review/scripts/reference/`），但该目录**不存在**。Python Path 对象在目录不存在时不报错，最终实际读取的是 `skills/eia-quick-review/reference/`。详情见 `references/skill_directory_structure_20260508.md`。
 
-- **运行时路径**：`~/.hermes/skills/eia-quick-review/reference/`（后端启动时加载，**不在 Git 追踪范围**）
-- **GitHub 备份**：`~/.hermes/workspace/eia-review/docs/`（workspace 内，gitignore 排除）
-- **目录结构**：
-  - `skill/reference/`（单数）— 运行时规则库 ← **更新规则时改这里**
-  - `skill/references/`（复数）— 分析文档，已迁至 `workspace/docs/references/`
-  - `scripts/` — 代码模块（不含 reference 子目录）
-- **更新流程**：修改规则 → ① 同步到 `skill/reference/` ② 推 GitHub 到 workspace docs 备份 → ③ 重启后端（启动事件才加载，非热更新）
-- **常见错误**：只更新了 `workspace/docs/` 副本，忘记同步到 `skill/reference/`（后端读的是后者）
+- **更新流程**：修改规则 → ① 同步到 `skill/reference/` ② `git push` 到 `eia-review-skill` 备份 → ③ 重启后端
+- **常见错误**：只更新了 `eia-review-skill` GitHub 副本，忘记同步到本地 `skill/reference/`（后端读的是后者）
 
-## R28 prompt优化方案（2026-05-13）
+## R28 prompt优化方案（2026-05-13）→ R29验证结果（2026-05-09）
 
 - **规则文本层**（`审核规则库-细则补充.md`）：
   - S-014~S-018 加注"有图/有文=已判定"
@@ -90,6 +106,7 @@ outputs:
   - S-022 加注 GB18597/18599 区分（GB18597=危废、GB18599=一般固废）
 - **Prompt约束层**（`llm_client.py`）：新增"概念区分提醒"Section；输出约束加跨章节 C-020 去重 + 数据容差 5% 标准
 - **生效条件**：改动后需重启后端
+- **R29验证结果**：同一报告（R28:147条 → R29:47条，减少68%）；假阳性消除率约75-85%；详见 `references/r29_r28_comparison_20260509.md`
 - **详情**：`references/prompt_optimization_r28_20260513.md`
 
 ## Bug记录
@@ -111,6 +128,18 @@ outputs:
 - **问题**：R28 的 `extraction` / `completeness_check` 记录在 DB 中缺失，前端中间产物页面无数据
 - **影响**：新字段只在代码 push **之后重启后端** 才生效；历史审查无法通过回补自动获得新字段数据
 - **验证**：`SELECT input_type, COUNT(*) FROM review_inputs WHERE review_id = ? GROUP BY input_type` 正常应有 `chapter(N条) + extraction(1条) + completeness_check(1条)`
+
+### C-017风险物质识别——LLM自创化学名称（2026-05-09 R29验证）
+- **问题**：R29审查 C-017-01 描述"风险物质识别遗漏硫酸乙醇"，但报告中表7.2-1列出的是"无水乙醇"和"硫酸"两种独立物质，不存在"硫酸乙醇"这个化合物
+- **根因**：LLM将两种独立物质（乙醇+硫酸）组合成一个新的错误化学名称，属于"自创内容"误判
+- **修复**：在 C-017 相关规则 prompt 中增加约束——"风险物质应与报告化学品清单一致，不得自行组合/添加；如报告未列出某物质，不得自行添加并判定为遗漏"
+
+### _find_relevant_tables 硬编码10表格限制（2026-05-09 R29验证）🔴
+- **问题**：R29 第七章（环境风险评价）有25个相关表格（table_id 180-204），但LLM只看到10个（180-189），表190-204（风险事故情形分析、事故应急池容积计算）全部缺失
+- **根因**：`scripts/chapter_review/process_chapters_v2.py` line 227 硬编码 `scored[:10]`——每个章节最多传10个表格给LLM
+- **影响**：C-017相关缺陷判断因缺少关键表格而出现误判/漏判
+- **修复**：将 `[:10]` 改为 `[:20]` 或按章节动态调整；同一章节25个表格时应传全部
+- **验证**：R29 extraction记录共220张表格，`review_inputs` 中第七章prompt只有10张表格（表180-189），而 extraction 中第七章实际有25张表格
 
 ### Chunk边界截断导致LLM看到标题但无正文（缺陷21根因）(2026-05-08)
 - **问题**：缺陷21（B-006-01）被判定为"严重"级假阳性——LLM看到"5.3 大气环境影响预测与评价"标题，判断内容缺失
@@ -151,7 +180,7 @@ outputs:
 - **修复**：数组改为5条，Step 4 label改为"逐章审查"，所有 index 顺移
 
 ## 版本
-- v2.24 (2026-05-13) — 新增规则库文件路径规范（skill/reference/ vs docs/ 双路径同步）；新增规则库更新流程；新增prompt优化R28 6项方案
+- v2.25 (2026-05-14) — 双仓库架构确认：eia-review-agent(项目) + eia-review-skill(技能本体)；删除 workspace/eia-review/skill 冗余目录；目录结构文档更新
 - v2.22 (2026-05-08) — R26缺陷21根因确认：chunk边界截断，新增`references/r26_defect21_chunk_boundary_20260508.md`
 - v2.20 (2026-05-08) — R26缺陷核实方法论，`references/r26_defect_verification_20260508.md`
 - v2.16 (2026-05-10) — 字段名统一：164处 `**检查内容**` → `**审核步骤**`；同步到workspace并推送 GitHub commit `e18da4d`

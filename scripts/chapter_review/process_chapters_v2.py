@@ -166,18 +166,43 @@ def _review_content(
         }]
 
 
+def _format_single_table(table: Dict, max_rows: int = 5) -> str:
+    """格式化单个表格为文本，限制行数避免撑爆prompt
+    
+    Args:
+        table: 表格数据字典
+        max_rows: 最多保留前N行（保留表头+前N-1行数据），默认5行
+    """
+    rows = table.get("data", [])
+    if not rows:
+        return ""
+    
+    table_id = table.get('table_id', '?')
+    chapter_num = table.get('chapter_num', '?')
+    result_lines = [f"表格 {table_id} (ch{chapter_num}):"]
+    
+    # 保留表头 + max_rows-1行数据，避免大表撑爆prompt
+    for row in rows[:max_rows]:
+        result_lines.append(" | ".join(str(c) for c in row))
+    
+    if len(rows) > max_rows:
+        result_lines.append(f"...（共 {len(rows)} 行，截断显示前{max_rows}行）")
+    
+    return '\n'.join(result_lines)
+
+
 def _find_relevant_tables(tables_data: List[Dict], chapter_num: str, chapter_name: str = "") -> str:
     """查找与指定章节相关的表格
 
     匹配策略：
-    1. 优先：表格的 chapter_num 与当前章节相同（同章节表格直接入选）
-    2. 补充：章节关键词在表格内容中命中的表格
-    3. 表格无 title 字段，用 data 内容全文匹配
+    1. 核心：同 chapter_num 的表格**全部**传入（不受数量限制）
+    2. 补充：跨章节关键词匹配命中的表格（最多10个，避免引入噪声）
+    3. 单个大表限制前5行，避免撑爆prompt
     """
     if not tables_data:
         return ""
 
-    # 章节关键词（补充映射）
+    # 章节关键词（补充映射，用于跨章节匹配）
     KEYWORD_CHAPTER_MAP = {
         '000': ['概述', '项目由来', '建设项目由来'],
         '001': ['总则', '评价标准', '评价等级', '环境功能区划'],
@@ -195,45 +220,48 @@ def _find_relevant_tables(tables_data: List[Dict], chapter_num: str, chapter_nam
     }
     chapter_keywords = set(KEYWORD_CHAPTER_MAP.get(chapter_num, []))
 
-    # 匹配表格
-    scored = []
-    for table in tables_data:
-        # 优先：同 chapter_num 直接入选（权重最高）
-        if table.get('chapter_num', '') == chapter_num:
-            scored.append((100, table))
-            continue
+    # 同章节表格（核心，必须全部传入）
+    same_chapter_tables = []
+    # 跨章节关键词匹配（补充，最多10个）
+    cross_ref_tables = []
 
-        # 否则用关键词匹配
-        score = 0
+    for table in tables_data:
         rows = table.get('data', [])
         if not rows:
             continue
 
-        # 用表格全文（所有行拼接）来匹配
-        all_text = ' '.join(' '.join(str(c) for c in row) for row in rows)
-
-        for kw in chapter_keywords:
-            if kw in all_text:
-                score += 1
-
-        if score > 0:
-            scored.append((score, table))
-
-    # 按相关度排序
-    scored.sort(key=lambda x: -x[0])
-
-    # 格式化输出（最多前10个表格）
-    result_lines = []
-    for score, table in scored[:10]:
-        rows = table.get("data", [])
-        if not rows:
+        # 策略1：同 chapter_num 的表格全部入选
+        if table.get('chapter_num', '') == chapter_num:
+            same_chapter_tables.append(table)
             continue
-        result_lines.append(f"[相关度:{score}] 表格 {table.get('table_id', '?')} (ch{table.get('chapter_num', '?')}):")
-        for row in rows[:5]:
-            result_lines.append(" | ".join(str(c) for c in row))
-        if len(rows) > 5:
-            result_lines.append(f"...（共 {len(rows)} 行）")
-        result_lines.append("")
+
+        # 策略2：跨章节关键词匹配（仅用于补充）
+        if chapter_keywords:
+            all_text = ' '.join(' '.join(str(c) for c in row) for row in rows)
+            score = sum(1 for kw in chapter_keywords if kw in all_text)
+            if score > 0:
+                cross_ref_tables.append((score, table))
+
+    # 跨章节表格按相关度排序，最多取10个
+    cross_ref_tables.sort(key=lambda x: -x[0])
+    cross_ref_tables = [t for _, t in cross_ref_tables[:10]]
+
+    # 合并：同章节（全部）+ 跨章节补充（最多10个）
+    all_relevant_tables = same_chapter_tables + cross_ref_tables
+
+    # 格式化输出
+    result_lines = []
+    if same_chapter_tables:
+        result_lines.append(f"【本章表格（共 {len(same_chapter_tables)} 个）】")
+        for t in same_chapter_tables:
+            result_lines.append(_format_single_table(t, max_rows=5))
+        if cross_ref_tables:
+            result_lines.append("")
+    
+    if cross_ref_tables:
+        result_lines.append(f"【相关表格-跨章节补充（共 {len(cross_ref_tables)} 个）】")
+        for t in cross_ref_tables:
+            result_lines.append(_format_single_table(t, max_rows=5))
 
     if not result_lines:
         return "（无相关表格数据）"
