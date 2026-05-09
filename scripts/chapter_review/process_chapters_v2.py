@@ -18,7 +18,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 # 添加父目录到路径
@@ -87,19 +87,25 @@ def review_single_chapter(
         # 获取适用规则（纯文本）
         rules_text = rules_loader.get_rules_for_chapter(chapter_num, chapter_name)
 
-        # 匹配相关表格
-        relevant_tables = _find_relevant_tables(tables_data, chapter_num, chapter_name) if tables_data else []
+        # 匹配相关表格（只调一次，返回完整文本+oversized信息）
+        tables_result = _find_relevant_tables(tables_data, chapter_num, chapter_name) if tables_data else {
+            "text": "", "oversized_table_ids": [], "total_table_count": 0,
+            "same_chapter_count": 0, "cross_ref_count": 0
+        }
+        tables_text = tables_result["text"]
 
         result["chapter_name"] = chapter_name
         result["rules_text"] = rules_text
-        result["tables"] = relevant_tables
+        result["tables"] = tables_text
+        result["oversized_table_ids"] = tables_result["oversized_table_ids"]
+        result["table_count"] = tables_result["total_table_count"]
 
         # 检查是否需要分块
         if len(content) <= 8000:
             # 不需要分块，直接审查
             findings = _review_content(
                 chapter_num, chapter_name, content, rules_text,
-                tables_data, previous_context, llm_reviewer
+                tables_text, previous_context, llm_reviewer
             )
             result["findings"] = findings
             result["chunks_reviewed"] = 1
@@ -113,7 +119,7 @@ def review_single_chapter(
                 chunk_context = last_context if i > 0 else previous_context
                 findings = _review_content(
                     chapter_num, chapter_name, chunk.content, rules_text,
-                    tables_data, chunk_context, llm_reviewer
+                    tables_text, chunk_context, llm_reviewer
                 )
                 all_findings.extend(findings)
                 last_context = chunk.content[-500:] if len(chunk.content) > 500 else chunk.content
@@ -134,21 +140,23 @@ def _review_content(
     chapter_name: str,
     content: str,
     rules_text: str,
-    tables_data: List[Dict],
+    tables_text: str,
     context: str,
     llm_reviewer: EIA_LLMReview
 ) -> List[Dict]:
-    """审查一块内容"""
-    # 匹配相关表格
-    relevant_tables = _find_relevant_tables(tables_data, chapter_num, chapter_name) if tables_data else ""
+    """审查一块内容
 
+    Args:
+        tables_text: 已格式化好的完整表格文本（由 process_chapter 调一次传入，
+                     不在此函数内重复调 _find_relevant_tables）
+    """
     try:
         review_result = llm_reviewer.review_chapter(
             chapter_num=chapter_num,
             chapter_name=chapter_name,
             chapter_content=content,
             rules_text=rules_text,
-            tables=relevant_tables,
+            tables=tables_text,
             context=context
         )
         return review_result.get("findings", [])
@@ -166,12 +174,11 @@ def _review_content(
         }]
 
 
-def _format_single_table(table: Dict, max_rows: int = 5) -> str:
-    """格式化单个表格为文本，限制行数避免撑爆prompt
+def _format_single_table(table: Dict) -> str:
+    """格式化单个表格为文本（完整内容，不限行数）
     
     Args:
-        table: 表格数据字典
-        max_rows: 最多保留前N行（保留表头+前N-1行数据），默认5行
+        table: 表格数据字典，包含 data, table_id, chapter_num
     """
     rows = table.get("data", [])
     if not rows:
@@ -181,26 +188,31 @@ def _format_single_table(table: Dict, max_rows: int = 5) -> str:
     chapter_num = table.get('chapter_num', '?')
     result_lines = [f"表格 {table_id} (ch{chapter_num}):"]
     
-    # 保留表头 + max_rows-1行数据，避免大表撑爆prompt
-    for row in rows[:max_rows]:
+    for row in rows:
         result_lines.append(" | ".join(str(c) for c in row))
-    
-    if len(rows) > max_rows:
-        result_lines.append(f"...（共 {len(rows)} 行，截断显示前{max_rows}行）")
     
     return '\n'.join(result_lines)
 
 
-def _find_relevant_tables(tables_data: List[Dict], chapter_num: str, chapter_name: str = "") -> str:
+def _find_relevant_tables(tables_data: List[Dict], chapter_num: str, chapter_name: str = "") -> Dict[str, Any]:
     """查找与指定章节相关的表格
 
     匹配策略：
-    1. 核心：同 chapter_num 的表格**全部**传入（不受数量限制）
-    2. 补充：跨章节关键词匹配命中的表格（最多10个，避免引入噪声）
-    3. 单个大表限制前5行，避免撑爆prompt
+    1. 核心：同 chapter_num 的表格**全部**传入（不受数量限制，完整内容）
+    2. 补充：跨章节关键词匹配命中的表格（最多10个，完整内容）
+    
+    Returns:
+        dict: {
+            "text": 格式化后的表格文本（完整内容）,
+            "oversized_table_ids": oversized表格ID列表（用于记录到DB）,
+            "total_table_count": 总表格数,
+            "same_chapter_count": 同章节表格数,
+            "cross_ref_count": 跨章节补充表格数,
+        }
     """
     if not tables_data:
-        return ""
+        return {"text": "", "oversized_table_ids": [], "total_table_count": 0,
+                "same_chapter_count": 0, "cross_ref_count": 0}
 
     # 章节关键词（补充映射，用于跨章节匹配）
     KEYWORD_CHAPTER_MAP = {
@@ -246,27 +258,35 @@ def _find_relevant_tables(tables_data: List[Dict], chapter_num: str, chapter_nam
     cross_ref_tables.sort(key=lambda x: -x[0])
     cross_ref_tables = [t for _, t in cross_ref_tables[:10]]
 
-    # 合并：同章节（全部）+ 跨章节补充（最多10个）
-    all_relevant_tables = same_chapter_tables + cross_ref_tables
+    # 统计 oversized（超过20行的表格）
+    oversized_table_ids = [
+        t['table_id'] for t in same_chapter_tables + cross_ref_tables
+        if len(t.get('data', [])) > 20
+    ]
 
-    # 格式化输出
+    # 格式化输出（完整内容，无行数限制）
     result_lines = []
     if same_chapter_tables:
         result_lines.append(f"【本章表格（共 {len(same_chapter_tables)} 个）】")
         for t in same_chapter_tables:
-            result_lines.append(_format_single_table(t, max_rows=5))
+            result_lines.append(_format_single_table(t))
         if cross_ref_tables:
             result_lines.append("")
     
     if cross_ref_tables:
         result_lines.append(f"【相关表格-跨章节补充（共 {len(cross_ref_tables)} 个）】")
         for t in cross_ref_tables:
-            result_lines.append(_format_single_table(t, max_rows=5))
+            result_lines.append(_format_single_table(t))
 
-    if not result_lines:
-        return "（无相关表格数据）"
+    text = '\n'.join(result_lines) if result_lines else "（无相关表格数据）"
 
-    return '\n'.join(result_lines)
+    return {
+        "text": text,
+        "oversized_table_ids": oversized_table_ids,
+        "total_table_count": len(same_chapter_tables) + len(cross_ref_tables),
+        "same_chapter_count": len(same_chapter_tables),
+        "cross_ref_count": len(cross_ref_tables),
+    }
 
 
 def _deduplicate_findings(findings: List[Dict]) -> List[Dict]:

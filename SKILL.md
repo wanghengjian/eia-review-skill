@@ -134,12 +134,16 @@ outputs:
 - **根因**：LLM将两种独立物质（乙醇+硫酸）组合成一个新的错误化学名称，属于"自创内容"误判
 - **修复**：在 C-017 相关规则 prompt 中增加约束——"风险物质应与报告化学品清单一致，不得自行组合/添加；如报告未列出某物质，不得自行添加并判定为遗漏"
 
-### _find_relevant_tables 硬编码10表格限制（2026-05-09 R29验证）🔴
+### _find_relevant_tables 硬编码10表格限制（2026-05-09 R29验证）🔴 → 已修复
 - **问题**：R29 第七章（环境风险评价）有25个相关表格（table_id 180-204），但LLM只看到10个（180-189），表190-204（风险事故情形分析、事故应急池容积计算）全部缺失
-- **根因**：`scripts/chapter_review/process_chapters_v2.py` line 227 硬编码 `scored[:10]`——每个章节最多传10个表格给LLM
+- **根因**：`scripts/chapter_review/process_chapters_v2.py` line 227 硬编码 `scored[:10]`
 - **影响**：C-017相关缺陷判断因缺少关键表格而出现误判/漏判
-- **修复**：将 `[:10]` 改为 `[:20]` 或按章节动态调整；同一章节25个表格时应传全部
-- **验证**：R29 extraction记录共220张表格，`review_inputs` 中第七章prompt只有10张表格（表180-189），而 extraction 中第七章实际有25张表格
+- **修复（2026-05-09）**：
+  - 同 `chapter_num` 表格**全部传入**（不限数量）
+  - 跨章节关键词匹配最多10个作为补充
+  - 新增 `_format_single_table()` 格式化函数，单表限5行避免撑爆prompt
+  - `process_chapters_v2.py.bak` 已删除
+- **验证**：commit `cefd31e`
 
 ### Chunk边界截断导致LLM看到标题但无正文（缺陷21根因）(2026-05-08)
 - **问题**：缺陷21（B-006-01）被判定为"严重"级假阳性——LLM看到"5.3 大气环境影响预测与评价"标题，判断内容缺失
@@ -180,7 +184,8 @@ outputs:
 - **修复**：数组改为5条，Step 4 label改为"逐章审查"，所有 index 顺移
 
 ## 版本
-- v2.25 (2026-05-14) — 双仓库架构确认：eia-review-agent(项目) + eia-review-skill(技能本体)；删除 workspace/eia-review/skill 冗余目录；目录结构文档更新
+- v2.25 (2026-05-09) — 双仓库架构确认：eia-review-agent(项目) + eia-review-skill(技能本体)；删除 workspace/eia-review/skill 冗余目录；目录结构文档更新
+- v2.26 (2026-05-09) — 表格数量限制修复（[:10]→不限）；C-017-01误判修复（风险物质识别）；R29 vs R28对比分析（147→47条，-68%）
 - v2.22 (2026-05-08) — R26缺陷21根因确认：chunk边界截断，新增`references/r26_defect21_chunk_boundary_20260508.md`
 - v2.20 (2026-05-08) — R26缺陷核实方法论，`references/r26_defect_verification_20260508.md`
 - v2.16 (2026-05-10) — 字段名统一：164处 `**检查内容**` → `**审核步骤**`；同步到workspace并推送 GitHub commit `e18da4d`
@@ -198,6 +203,8 @@ outputs:
 - `references/rules_split_20260510.md` — 规则库拆分操作记录
 - `references/r25_llm_false_positives_20260510.md` — 7条LLM误判分析
 - `references/r28_defect_verification_20260512.md` — R28缺陷核实报告
+- `references/r29_r28_comparison_20260509.md` — R29 vs R28对比分析报告（同一报告，68%缺陷减少）
+- `references/prompt_optimization_r28_20260513.md` — R28 prompt优化方案（6项）
 - `references/r26_defect_verification_20260508.md` — R26缺陷核实方法论
 - `references/r26_52_defect_verification_20260508.md` — R26 52条逐条核实表
 - `references/r26_defect21_chunk_boundary_20260508.md` — 缺陷21根因分析
