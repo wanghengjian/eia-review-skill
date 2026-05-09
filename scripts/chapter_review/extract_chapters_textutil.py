@@ -977,6 +977,15 @@ def splitChapters(full_text: str) -> Tuple[Dict[str, Dict], str]:
         content = '\n'.join(current_content)
         if content.strip():
             chapters[current_chapter] = {"content": content, "line_count": len(current_content)}
+
+    # ── 兜底：附件章节遗漏检测 ─────────────────────────────────────────────
+    # 旧版 full_text（无 [H1:附件] 标记）时，附件内容会归入最后一个章节。
+    # 如果正文末尾有附件关键词但没有 012，说明附件被归入了末章，
+    # 此时不需要创建单独的 012 章节（以免重复），只需确保完整性检查通过即可。
+    # 由于 _run_completeness_check 检查的是 "012" in chapter_nums，
+    # 如果 ch012 不存在但正文末尾有附件内容，应视为完整性通过（附件已包含在末章中）。
+    pass  # 兜底逻辑已由 _run_completeness_check 端处理，此处无需修改 chapters
+
     return chapters, '\n'.join(toc_content)
 
 
