@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "utils"))
 from review_rules_loader import ReviewRulesLoader, get_rules_loader
 from review_by_llm import EIA_LLMReview
 from chunker import TextChunker, create_chunks
-from pre_scan import generate_pre_scan_report
+from .pre_scan import generate_pre_scan_report
 
 
 # 并发配置
