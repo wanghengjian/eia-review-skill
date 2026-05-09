@@ -198,69 +198,24 @@ def _find_relevant_tables(tables_data: List[Dict], chapter_num: str, chapter_nam
     """查找与指定章节相关的表格
 
     匹配策略：
-    1. 核心：同 chapter_num 的表格**全部**传入（不受数量限制，完整内容）
-    2. 补充：跨章节关键词匹配命中的表格（最多10个，完整内容）
+    1. 同 chapter_num 的表格**全部**传入（不受数量限制，完整内容）
     
     Returns:
         dict: {
             "text": 格式化后的表格文本（完整内容）,
             "oversized_table_ids": oversized表格ID列表（用于记录到DB）,
             "total_table_count": 总表格数,
-            "same_chapter_count": 同章节表格数,
-            "cross_ref_count": 跨章节补充表格数,
         }
     """
     if not tables_data:
-        return {"text": "", "oversized_table_ids": [], "total_table_count": 0,
-                "same_chapter_count": 0, "cross_ref_count": 0}
-
-    # 章节关键词（补充映射，用于跨章节匹配）
-    KEYWORD_CHAPTER_MAP = {
-        '000': ['概述', '项目由来', '建设项目由来'],
-        '001': ['总则', '评价标准', '评价等级', '环境功能区划'],
-        '002': ['项目工程概况', '工程概况', '建设内容', '项目组成', '组成表', '主要设备'],
-        '003': ['工程分析', '原辅材料', '原料', '物料', '产品方案', '工艺', '设备'],
-        '004': ['环境现状', '监测', '调查', '环境质量'],
-        '005': ['预测', '评价', '环境影响'],
-        '006': ['环保措施', '治理', '处理', '设施'],
-        '007': ['风险', '风险评价', '环境风险'],
-        '008': ['经济损益', '效益', '经济效益', '总量控制'],
-        '009': ['环境管理', '监测计划', '监控'],
-        '010': ['合理性', '选址', '规模', '产业政策'],
-        '011': ['结论', '总结'],
-        '012': ['附件', '附表', '附录'],
-    }
-    chapter_keywords = set(KEYWORD_CHAPTER_MAP.get(chapter_num, []))
+        return {"text": "", "oversized_table_ids": [], "total_table_count": 0}
 
     # 同章节表格（核心，必须全部传入）
-    same_chapter_tables = []
-    # 跨章节关键词匹配（补充，最多10个）
-    cross_ref_tables = []
-
-    for table in tables_data:
-        rows = table.get('data', [])
-        if not rows:
-            continue
-
-        # 策略1：同 chapter_num 的表格全部入选
-        if table.get('chapter_num', '') == chapter_num:
-            same_chapter_tables.append(table)
-            continue
-
-        # 策略2：跨章节关键词匹配（仅用于补充）
-        if chapter_keywords:
-            all_text = ' '.join(' '.join(str(c) for c in row) for row in rows)
-            score = sum(1 for kw in chapter_keywords if kw in all_text)
-            if score > 0:
-                cross_ref_tables.append((score, table))
-
-    # 跨章节表格按相关度排序，最多取10个
-    cross_ref_tables.sort(key=lambda x: -x[0])
-    cross_ref_tables = [t for _, t in cross_ref_tables[:10]]
+    same_chapter_tables = [t for t in tables_data if t.get('chapter_num') == chapter_num]
 
     # 统计 oversized（超过20行的表格）
     oversized_table_ids = [
-        t['table_id'] for t in same_chapter_tables + cross_ref_tables
+        t['table_id'] for t in same_chapter_tables
         if len(t.get('data', [])) > 20
     ]
 
@@ -270,22 +225,15 @@ def _find_relevant_tables(tables_data: List[Dict], chapter_num: str, chapter_nam
         result_lines.append(f"【本章表格（共 {len(same_chapter_tables)} 个）】")
         for t in same_chapter_tables:
             result_lines.append(_format_single_table(t))
-        if cross_ref_tables:
-            result_lines.append("")
-    
-    if cross_ref_tables:
-        result_lines.append(f"【相关表格-跨章节补充（共 {len(cross_ref_tables)} 个）】")
-        for t in cross_ref_tables:
-            result_lines.append(_format_single_table(t))
+    else:
+        return {"text": "（无相关表格数据）", "oversized_table_ids": [], "total_table_count": 0}
 
-    text = '\n'.join(result_lines) if result_lines else "（无相关表格数据）"
+    text = '\n'.join(result_lines)
 
     return {
         "text": text,
         "oversized_table_ids": oversized_table_ids,
-        "total_table_count": len(same_chapter_tables) + len(cross_ref_tables),
-        "same_chapter_count": len(same_chapter_tables),
-        "cross_ref_count": len(cross_ref_tables),
+        "total_table_count": len(same_chapter_tables),
     }
 
 

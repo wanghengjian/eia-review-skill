@@ -134,16 +134,15 @@ outputs:
 - **根因**：LLM将两种独立物质（乙醇+硫酸）组合成一个新的错误化学名称，属于"自创内容"误判
 - **修复**：在 C-017 相关规则 prompt 中增加约束——"风险物质应与报告化学品清单一致，不得自行组合/添加；如报告未列出某物质，不得自行添加并判定为遗漏"
 
-### _find_relevant_tables 硬编码10表格限制（2026-05-09 R29验证）🔴 → 已修复
-- **问题**：R29 第七章（环境风险评价）有25个相关表格（table_id 180-204），但LLM只看到10个（180-189），表190-204（风险事故情形分析、事故应急池容积计算）全部缺失
-- **根因**：`scripts/chapter_review/process_chapters_v2.py` line 227 硬编码 `scored[:10]`
-- **影响**：C-017相关缺陷判断因缺少关键表格而出现误判/漏判
-- **修复（2026-05-09）**：
-  - 同 `chapter_num` 表格**全部传入**（不限数量）
-  - 跨章节关键词匹配最多10个作为补充
-  - 新增 `_format_single_table()` 格式化函数，单表限5行避免撑爆prompt
-  - `process_chapters_v2.py.bak` 已删除
-- **验证**：commit `cefd31e`
+### `_find_relevant_tables` 表格匹配策略与两处代码同步（2026-05-09）
+- **旧策略**：硬编码 `[:10]` 限制 + 每表限5行 → R29第七章25表只传10个，C-017误判
+- **新策略**：
+  - 同 `chapter_num` 表格**全部传入**（不限数量），完整行
+  - 跨章节关键词匹配最多10个作为补充，完整行
+  - Oversized 阈值：>20行（用于记录到DB，不截断）
+- **两处必须同步**：`process_chapters_v2.py` 和 `backend/app/api/reviews.py` 各有一份实现，修改时必须同步
+- **调用一次原则**：`process_chapter` 调一次 `_find_relevant_tables`，结果传给 `_review_content`，后者不重复调
+- **参考**：`references/table_handling_oversized_20260509.md`
 
 ### Chunk边界截断导致LLM看到标题但无正文（缺陷21根因）(2026-05-08)
 - **问题**：缺陷21（B-006-01）被判定为"严重"级假阳性——LLM看到"5.3 大气环境影响预测与评价"标题，判断内容缺失
@@ -204,6 +203,7 @@ outputs:
 - `references/r25_llm_false_positives_20260510.md` — 7条LLM误判分析
 - `references/r28_defect_verification_20260512.md` — R28缺陷核实报告
 - `references/r29_r28_comparison_20260509.md` — R29 vs R28对比分析报告（同一报告，68%缺陷减少）
+- `references/table_handling_oversized_20260509.md` — 表格完整传入 + oversized_tables 字段（两处代码同步）
 - `references/prompt_optimization_r28_20260513.md` — R28 prompt优化方案（6项）
 - `references/r26_defect_verification_20260508.md` — R26缺陷核实方法论
 - `references/r26_52_defect_verification_20260508.md` — R26 52条逐条核实表
