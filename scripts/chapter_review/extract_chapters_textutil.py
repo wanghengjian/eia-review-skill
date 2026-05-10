@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# 表格编号正则：表1.4-1, 表1.4-2, 表3.5-31, 表5.3-5 等
+TABLE_NUM_PATTERN = re.compile(r'表(\d+(?:[.-]\d+)+)')
+
 # 尝试导入文档处理库
 try:
     from docx import Document

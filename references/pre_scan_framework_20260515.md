@@ -1,4 +1,4 @@
-# 预扫描框架：系统性消除LLM机械误判（2026-05-15 完成）
+# 预扫描框架：系统性消除LLM机械误判（2026-05-16 更新）
 
 ## 核心思路
 
@@ -25,23 +25,22 @@ LLM 擅长：理解规则、判断逻辑、评估合理性。
 2. **数值预验算**：按规则对分项数值做加总验证，±5%容差，过滤不合理大值
 3. **章节引用校验**：检测正文引用某编号时该编号是否真实存在
 
-### R32测试结果
+### 表格编号索引的局限与改进（2026-05-16 新增）
 
+**旧问题**：`table_index` 从正文文本扫描"表X.X-X"，但正文里可能用"见下表"代替实际编号——导致某些表被引用但未被索引，且无法区分同名异表（如同一表号在不同章节复用）。
+
+**新方案**（已实现，commit `e59331b`）：
+- `extract_chapters_textutil.py` 的 `_extract_single_table()` 从**表格第一行第一格**解析实际表号（如"表3.3-1" → "3.3-1"），写入 `table_number` 字段
+- `_tables.json` 中每条记录新增 `table_number` 字段（无则为 null）
+- `pre_scan.py` 新增 `verify_table_existence()`：对比"正文引用了的表号"与"实际提取到的 table_number"，发现不匹配时输出 `TABLE_NUMBER_NOT_IN_EXTRACTED` 类型问题，注入 LLM prompt
+
+**注入 LLM 的格式**：
 ```
-预扫描完成：13章节，179个表格编号，0条数值矛盾，0条引用问题
-表2.2-1: ['002']  ← LLM误判B-008-02"表不存在"，预扫描确认存在于ch002
-表3.5-31: ['003', '006']  ← 在ch003和ch006复用
+**⚠️ 表号真实性警告（预扫描验证过实际表格）：**
+- ❌ 第003章：正文引用「表3.3-1」，但实际提取的表格中未找到此表号（上下文：「...引用了表3.3-1...」）
 ```
 
-### 关键API
-
-```python
-from pre_scan import generate_pre_scan_report
-
-pre_report = generate_pre_scan_report(extract_dir / "extract")
-# 返回：{chapter_count, table_count, table_index, verified_numbers,
-#        numeric_contradictions, cross_ref_issues, llm_injection}
-```
+**注意**：该校验依赖 `_tables.json` 中的 `table_number` 字段——只有用新版 `extract_chapters_textutil.py`（含 `table_number` 解析）提取的报告才有此字段。对历史报告重新提取即可获得。
 
 ### 已验证的数值规则
 
@@ -63,37 +62,13 @@ pre_report = generate_pre_scan_report(extract_dir / "extract")
 **`scripts/chapter_review/process_chapters_v2.py`**：
 - import `generate_pre_scan_report`
 - `review_single_chapter()` / `_review_content()` 新增 `pre_scan_injection` 参数
-- `review_chapters_async()` 在并发审查开始前调用预扫描，报告保存到 `output/pre_scan_report.json`
-
-### 审查流程（优化后）
-
-```
-DOCX → extract → splitChapters
-              ↓
-        【新增】预扫描（~1秒）
-              ↓
-        生成 pre_scan_report.json
-        生成 llm_injection 文本
-              ↓
-        注入每个章节prompt → LLM逐章审查
-              ↓
-        所有章节审查完成 → 入库
-```
+- `_format_single_table()` 输出格式改为 `表格 5 (ch3) [3.3-1]`，LLM 审查时直接看到实际表号
 
 ---
 
 ## 阶段3：`post_validate.py`
 
-### 核心API
-
-```python
-from post_validate import validate_findings, summarize_flags
-
-validated = validate_findings(raw_findings, pre_scan_report)
-summary = summarize_flags(validated)
-```
-
-### 校验规则（2026-05-16 更新）
+### 校验规则
 
 | 规则ID | 场景 | flag |
 |--------|------|------|
@@ -102,21 +77,6 @@ summary = summarize_flags(validated)
 | C-001 | 一致时记为缺陷 | `C-001类：一致时应描述为符合` |
 | C-019 | 公众参与跨章节适用 | `C-019跨章节：确认内容是否在概述章节` |
 | A类缺陷 | 缺陷描述中无明确法规/标准强制依据关键词 | `A_WITHOUT_EXPLICIT_LAW` → 降级提示 |
-
-### 新增：`cross_validate_findings()`（2026-05-16）
-
-检测LLM缺陷描述与报告原文的矛盾，用于catch高风险规则的阅读理解错误。
-
-```python
-from post_validate import cross_validate_findings
-validated = cross_validate_findings(raw_findings, full_report_text)
-```
-
-**高风险规则**：`C-010-03`, `C-010-01`, `C-010-02`
-
-**机制**：检测缺陷描述中的否定词（缺少/未提及/未引用/未包含），在报告中检索是否存在矛盾的正向表述。若发现矛盾，追加 `_cross_flags` 并设置 `_flag_type=CROSS_VALIDATION_FAILED`。
-
-**适用条件**：仅对高风险规则执行，避免全文检索成本。
 
 ---
 
@@ -127,7 +87,6 @@ validated = cross_validate_findings(raw_findings, full_report_text)
 | 数据一致误判矛盾 | 813.5=27.8+785.7，LLM判矛盾 | ✅ | 数值预验算 |
 | 小结文字误解 | 小结已写明N9超标，LLM判隐瞒 | ❌ | 依赖LLM理解 |
 | 表格结构误读 | 多级表头，LLM扫片段就下结论 | ✅ | 表格全量传入 |
-| 自创编号 | LLM引用表2.2-1不存在 | ✅ | 表格编号索引 |
+| 自创编号 | LLM引用表2.2-1不存在 | ✅ | 表格编号索引（文本扫描） |
+| 表号真实性 | LLM说"表3.3-1不存在"但表在表格提取数据里 | ✅ | `verify_table_existence()`（用 table_number 字段） |
 | 标准适用性过度解读 | 格式不完整→判定适用错误 | ❌ | 需⚠️判断标准 |
-
-**消除率预估**：表格不存在类+B-005数值矛盾类可基本消除（~50%假阳性）。

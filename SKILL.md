@@ -344,24 +344,42 @@ outputs:
 - **修复**：key 改为 `description[:100]`
 - **commit**：`dd1e899`（eia-review-agent）
 
+### 表格编号解析——真实表号提取（2026-05-16）
+
+**问题**：系统用顺序 `table_id`（1,2,3...）而非报告里的实际表号（如"3.3-1"），LLM 报"表3.3-1不存在"时系统无法对应验证。
+
+**修复**：
+1. `extract_chapters_textutil.py` `_extract_single_table()`：从表格第一行第一格解析实际表号（如"表3.3-1" → "3.3-1"），新增 `table_number` 字段
+2. `reviews.py` `_format_relevant_tables()` line 567：输出改为 `表格 5 (ch3, [3.3-1])` 格式，LLM 审查时直接看到实际表号
+3. `process_chapters_v2.py` `_format_single_table()`：同步更新（但注意：此文件是独立 CLI，production 用的是 reviews.py 里的版本）
+
+**⚠️ 架构澄清**：之前 skill 文档说"两处必须同步"是**误解**。`process_chapters_v2.py` 是独立 CLI，从不被 `reviews.py` import；production 唯一执行的表格格式化在 `reviews.py` line 541 的 `_format_relevant_tables()`。详见 `references/architecture_fixes_20260510.md`。
+
 ### 单元测试套件 + Pre-commit hook（2026-05-16）
 - **问题**：R31~R35 每轮都 `NameError: name 'project_id' is not defined`，规则优化建议每轮生成 0 条
 - **根因**：Step 6 的 try 块里引用了外层不存在的局部变量
 - **修复**：改用已查到的 `review.project_id`
-- **commit**：`e54d18b`（eia-review-agent）
-
-### 单元测试套件 + Pre-commit hook（2026-05-16）
-- **位置**：`backend/tests/`（3个新文件，77 tests）
-- **新测试**：`test_validate_findings.py`（C-021降级）、`test_severity_mapping.py`（映射）、`test_rule_optimization.py`（project_id/去重）
-- **Pre-commit hook**：`backend/.git-hooks/pre-commit`（>1MB 禁止 commit）
-- **commits**：`2ee9fc8`（hook+测试）、`dd1e899`（dedup修复）
+- **单元测试位置**：`backend/tests/`（3个新文件，77 tests）
+  - `test_validate_findings.py`（C-021降级）
+  - `test_severity_mapping.py`（映射）
+  - `test_rule_optimization.py`（project_id/去重）
+- **Pre-commit hook**：`backend/.git-hooks/pre-commit`（>1MB 禁止 commit，防止 review.db 再入仓库）
+- **commits**：`2ee9fc8`（hook+测试）、`dd1e899`（dedup修复）、`e54d18b`（project_id）
 
 ### R35 缺陷核实（2026-05-16）
-- **结果**：37条（严重6/较重27/一般4）；全部37条关键词命中；6条严重全为 B-005 类
-- **核实脚本**：`docs/verify_r35_defects.py`
+- **方法**：python-docx 提取全文本（段落2574段+表格220个），对37条缺陷逐条搜索关键词验证
+- **结果**：37条（严重6/较重27/一般4）；全部37条关键词命中；**命中率100%**（0存疑，0不实）
+- **核实脚本**：`docs/verify_r35_defects.py`（workspace docs/，不在git）；`scripts/verify_r35_defects.py`（skill scripts/）
+- **核实报告**：`references/r35_defect_verification_20260510.md`（37条逐条核实结论）
 
 ## 版本
 
+- v2.39 (2026-05-16) — 表格编号解析（真实表号）+ Pre-commit hook
+  - **表格编号解析**：`extract_chapters_textutil.py` 解析实际表号（如"3.3-1"）写入 `table_number` 字段；`reviews.py` `_format_relevant_tables()` 显示实际表号格式
+  - **⚠️ 架构澄清**：`process_chapters_v2.py` 是独立 CLI，从不被 `reviews.py` 调用；`pre_scan.py` 的 `verify_table_existence()` 是死代码，production 不执行。详见 `references/architecture_fixes_20260510.md`
+  - **Pre-commit hook**：>1MB 文件禁止 commit（防止 review.db 入仓库）
+  - **R35核实完成**：37条全属实，命中率100%（首次达到）
+  - **commits**：`ef0dbbf`（reviews.py `_format_relevant_tables`）、skill push（extract_chapters_textutil `TABLE_NUM_PATTERN`）
 - v2.38 (2026-05-16) — 单元测试+Pre-commit hook+R35缺陷全核实
   - **单元测试**：3个新文件，77 tests（test_validate_findings/severity_mapping/rule_optimization）
   - **Pre-commit hook**：>1MB 文件禁止 commit，防止 review.db 再入仓库
