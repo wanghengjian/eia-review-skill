@@ -76,6 +76,26 @@ def validate_findings(
                 "C-019跨章节适用：确认公众参与内容是否在概述章节，若仅在结论章节则不记缺陷"
             )
         
+        # === 严重度校验：A类缺陷必须有明确法规/标准依据 ===
+        severity = f.get("severity", "")
+        if severity == "A" or severity.startswith("🔴"):
+            # 检索缺陷描述中是否含有明确法规依据关键词
+            law_keywords = [
+                "不符合《", "违反", "必须执行", "应当采用",
+                "未按", "未满足", "未执行", "未引用",
+                "排放限值", "浓度限值", "标准限值", "行业标准",
+                "强制", "不应", "禁止"
+            ]
+            has_law_basis = any(kw in desc for kw in law_keywords)
+
+            if not has_law_basis:
+                f["_validate_flags"].append(
+                    "⚠️ 严重度疑问：此缺陷被判定为A类，但缺陷描述中未发现明确法规/标准强制依据。"
+                    "请人工复核：若缺陷仅为'引用标准不够精确'或'缺少某种论证'而引用本身不构成明确错误，"
+                    "建议维持B类而非升A。"
+                )
+                f["_severity_flag"] = "A_WITHOUT_EXPLICIT_LAW"
+
         # 判断是否需要降权（高置信度flag → 标记为疑似假阳性）
         if f["_validate_flags"]:
             high_confidence_flags = [
@@ -85,9 +105,9 @@ def validate_findings(
             if high_confidence_flags:
                 f["_flag_type"] = "PRE_SCAN_CONTRADICTION"
                 f["_confidence_override"] = "low"
-        
+
         validated.append(f)
-    
+
     return validated
 
 
@@ -127,7 +147,9 @@ def summarize_flags(validated_findings: List[Dict]) -> Dict[str, Any]:
             "id": f.get("id", ""),
             "rule_id": f.get("rule_id", ""),
             "title": f.get("title", ""),
+            "severity": f.get("severity", ""),
             "flags": f.get("_validate_flags", []),
             "flag_type": f.get("_flag_type", "NEEDS_REVIEW"),
+            "severity_flag": f.get("_severity_flag", ""),
         })
     return summary
