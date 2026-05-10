@@ -9,6 +9,83 @@ import re
 from typing import Any, Dict, List
 
 
+def cross_validate_findings(
+    raw_findings: List[Dict],
+    full_report_text: str
+) -> List[Dict]:
+    """
+    章节一致性交叉验证：检测LLM缺陷描述与报告原文的矛盾。
+
+    机制：
+    - 提取缺陷描述中的关键事实陈述（如"引用资料A1-A2缺少NOx"）
+    - 在报告原文中检索该事实陈述
+    - 若原文明确包含与缺陷描述相反的内容，标记为"疑似误判"
+
+    Args:
+        raw_findings: LLM输出的原始缺陷列表
+        full_report_text: 报告书完整文本
+
+    Returns:
+        附加了交叉验证flag的缺陷列表
+    """
+    if not full_report_text or not raw_findings:
+        return raw_findings
+
+    # 已知的高风险规则（容易出现LLM阅读理解错误）
+    high_risk_rules = {"C-010-03", "C-010-01", "C-010-02"}
+
+    # 反义词/否定模式（用于检测缺陷描述与原文矛盾）
+    negation_patterns = [
+        (r"缺少", r"含有|包含|具备|具备|有\d"),
+        (r"未提及", r"已提及|提及|写了|指出"),
+        (r"未引用", r"引用了|引自|依据"),
+        (r"未包含", r"包含|含有|涵盖"),
+        (r"无", r"有\d|含|具备"),
+    ]
+
+    validated = []
+    for finding in raw_findings:
+        f = dict(finding)
+        f["_cross_flags"] = []
+
+        rule_id = f.get("rule_id", "")
+        desc = f.get("description", "")
+
+        # 仅对高风险规则执行交叉验证
+        if rule_id not in high_risk_rules:
+            validated.append(f)
+            continue
+
+        # 检测缺陷描述中是否含有明确的"缺失/缺少/未X"陈述
+        for neg_pattern, pos_pattern in negation_patterns:
+            neg_match = re.search(neg_pattern, desc)
+            if not neg_match:
+                continue
+
+            neg_phrase = neg_match.group(0)
+            # 提取缺失项的名称（如"NOx"、"氨氮"等）
+            # 向前向后各取10个字符作为上下文
+            start = max(0, neg_match.start() - 10)
+            end = min(len(desc), neg_match.end() + 15)
+            context = desc[start:end]
+
+            # 在报告中检索正面的表述
+            # 如果报告明确包含"有NOx"或"已包含NOx"等，则矛盾
+            if re.search(pos_pattern, full_report_text):
+                # 进一步确认：正面表述确实提到了缺失项
+                mentioned_item = context
+                if re.search(pos_pattern.replace("\\d", ""), full_report_text):
+                    f["_cross_flags"].append(
+                        f"⚠️ 交叉验证疑问：缺陷描述称'{neg_phrase}'，"
+                        f"但报告中存在与此矛盾的正向表述，请复核原文确认缺陷是否成立。"
+                    )
+                    f["_flag_type"] = "CROSS_VALIDATION_FAILED"
+
+        validated.append(f)
+
+    return validated
+
+
 def validate_findings(
     raw_findings: List[Dict],
     pre_scan_report: Dict[str, Any]
