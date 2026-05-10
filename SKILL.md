@@ -248,6 +248,28 @@ outputs:
 
 ## Bug记录
 
+### `TABLE_NUM_PATTERN` 正则不匹配表号前空格（2026-05-11）
+- **问题**：正则 `表(\d+(?:[.-]\d+)+)` 无法匹配 `表 5.4-2`（表号前有空格）、`表 1.4-1`
+- **影响**：部分表格的 `table_number` 字段解析失败，导致 LLM 无法追溯该表编号
+- **修复**：`TABLE_NUM_PATTERN = re.compile(r'表\s*(\d+(?:[.-]\d+)+)')`（加 `\s*` 兼容空格）
+- **位置**：`extract_chapters_textutil.py` line 25
+- **验证**：
+  ```
+  "表3.3-1  污染源名称" → "3.3-1"  ✓
+  "表 5.4-2 大气预测结果" → "5.4-2"  ✓（之前不匹配）
+  "表 1.4-1" → "1.4-1"  ✓（之前不匹配）
+  ```
+
+### `pre_scan.py` 死代码确认并清理（2026-05-11）
+- **确认**：`verify_table_existence()` 从未被 `reviews.py` 调用，是遗留死代码
+- **已删除**：
+  - `verify_table_existence()` 函数体
+  - `generate_pre_scan_report()` 中对 `table_existence_issues` 的调用
+  - `generate_llm_injection()` 签名中的 `table_existence_issues` 参数
+  - `generate_llm_injection()` 体内的表号存在性注入逻辑
+- **production 真实路径**：`extract_from_docx()` → `table["table_number"]` → `_format_relevant_tables()`（reviews.py line 541）→ LLM prompt
+- **架构确认**：详见 `references/architecture_fixes_20260510.md`（已更新本轮清理记录）
+
 ### 中间产物页面「提取结果」点击详情闪退（DOM过载）(2026-05-13)
 - **问题**：R28 extraction记录（220张表格JSON ~500KB）点"查看详情"，Drawer闪一下就消失，无任何报错
 - **根因**：`viewExtraction()` 把220张表格的完整JSON（含所有cell数据）全部塞入 `<pre>` 标签渲染，Element Plus的Drawer在构建超大DOM时短暂卡顿 → 视觉上闪退
@@ -373,6 +395,14 @@ outputs:
 - **核实报告**：`references/r35_defect_verification_20260510.md`（37条逐条核实结论）
 
 ## 版本
+
+- v2.40 (2026-05-11) — 表格编号正则修复 + 死代码清理
+  - **`TABLE_NUM_PATTERN`**：正则从 `表(\d+(?:[.-]\d+)+)` 改为 `表\s*(\d+(?:[.-]\d+)+)`，兼容表号前空格
+  - **`pre_scan.py` 死代码清理**：确认 `verify_table_existence()` 从未被 production 调用，删除函数体及所有引用
+  - **架构确认**：`process_chapters_v2.py` 是独立 CLI、`pre_scan.py` 是独立 CLI，`reviews.py` 是 production 唯一入口
+  - **skill 文档同步**：更新 `references/architecture_fixes_20260510.md` 记录本次清理；`eia-quick-review-debugging` skill 同步更新
+  - **架构文档**：`docs/环评快审体系_技术架构与审查逻辑_20260510.md`（workspace docs/，含完整流程图）
+  - **commit**：`bc6552f`（skill `TABLE_NUM_PATTERN`）、`ef0dbbf`（reviews.py `_format_relevant_tables`）、eia-review-agent 已推送
 
 - v2.39 (2026-05-16) — 表格编号解析（真实表号）+ Pre-commit hook
   - **表格编号解析**：`extract_chapters_textutil.py` 解析实际表号（如"3.3-1"）写入 `table_number` 字段；`reviews.py` `_format_relevant_tables()` 显示实际表号格式
