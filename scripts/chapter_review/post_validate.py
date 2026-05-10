@@ -88,20 +88,22 @@ def cross_validate_findings(
 
 def validate_findings(
     raw_findings: List[Dict],
-    pre_scan_report: Dict[str, Any]
+    pre_scan_report: Dict[str, Any] = None
 ) -> List[Dict]:
     """
-    对LLM原始缺陷列表进行后校验
+    对LLM原始缺陷列表进行后校验。
     
+    pre_scan_report 可选（为 None 时跳过预扫描相关校验，保留其他校验逻辑）。
+
     Args:
         raw_findings: LLM输出的原始缺陷列表
-        pre_scan_report: 预扫描报告（来自pre_scan.py）
-    
+        pre_scan_report: 预扫描报告（来自pre_scan.py），可选
+
     Returns:
         校验后的缺陷列表（增加flag字段）
     """
     if not pre_scan_report or pre_scan_report.get("error"):
-        return raw_findings
+        pre_scan_report = {}
     
     table_index = pre_scan_report.get("table_index", {})
     verified_numbers = pre_scan_report.get("verified_numbers", [])
@@ -172,6 +174,30 @@ def validate_findings(
                     "建议维持B类而非升A。"
                 )
                 f["_severity_flag"] = "A_WITHOUT_EXPLICIT_LAW"
+
+        # === B→A 强制降级：B类规则输出 high 但无强制法规依据 ===
+        # C-021 等 B 类规则，技术论证不完整 ≠ 违反强制法规，
+        # 若 LLM 输出 high（严重）但描述中无明确法规依据，降为 medium（较重）
+        if severity == "high":
+            rule_id_str = rule_id or ""
+            # C-021 系列：无强制法规依据（属技术论证要求）
+            c021_rules = {"C-021-01", "C-021-02", "C-021-03", "C-021-04", "C-021-05"}
+            law_basis_keywords = [
+                "不符合《", "违反", "必须执行", "应当采用",
+                "未按", "未满足", "未执行", "未引用",
+                "排放限值", "浓度限值", "标准限值", "行业标准",
+                "强制", "不应", "禁止"
+            ]
+            has_law = any(kw in desc for kw in law_basis_keywords)
+
+            if rule_id_str in c021_rules and not has_law:
+                f["_validate_flags"].append(
+                    f"B→A误升：C-021系列（{rule_id}）为B类技术论证规则，"
+                    f"缺陷描述无强制法规依据，不应判为严重（high）。"
+                    f"强制降为较重（medium）。"
+                )
+                f["severity"] = "medium"
+                f["_severity_flag"] = "B_TO_A_DEMOTED"
 
         # 判断是否需要降权（高置信度flag → 标记为疑似假阳性）
         if f["_validate_flags"]:
