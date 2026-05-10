@@ -322,12 +322,21 @@ def extract_from_docx(docx_path: str) -> Tuple[str, List[Dict], Dict]:
                         ).strip()
                         row_data.append(cell_text)
                     table_data.append(row_data)
+                # 从第一行第一格解析表号（如"表3.3-1" → "3.3-1"）
+                table_number = None
+                if table_data and table_data[0]:
+                    first_cell = table_data[0][0] if table_data[0] else ""
+                    m = TABLE_NUM_PATTERN.search(first_cell)
+                    if m:
+                        table_number = m.group(1)
+
                 tables.append({
                     "table_id": table_id,
                     "chapter_num": chapter_num,
                     "data": table_data,
                     "rows": len(table_data),
                     "cols": len(table_data[0]) if table_data else 0,
+                    "table_number": table_number,  # 实际表号，如"3.3-1"
                 })
                 table_id += 1
 
@@ -372,6 +381,7 @@ def extract_from_docx(docx_path: str) -> Tuple[str, List[Dict], Dict]:
                 "data": table_data,
                 "rows": len(table_data),
                 "cols": len(table_data[0]) if table_data else 0,
+                "table_number": None,  # 兜底表格不解析表号
             })
             table_id += 1
 

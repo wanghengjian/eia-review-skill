@@ -193,7 +193,11 @@ def _format_single_table(table: Dict) -> str:
     
     table_id = table.get('table_id', '?')
     chapter_num = table.get('chapter_num', '?')
-    result_lines = [f"表格 {table_id} (ch{chapter_num}):"]
+    table_number = table.get('table_number')
+    header = f"表格 {table_id} (ch{chapter_num})"
+    if table_number:
+        header += f" [{table_number}]"
+    result_lines = [header + ":"]
     
     for row in rows:
         result_lines.append(" | ".join(str(c) for c in row))

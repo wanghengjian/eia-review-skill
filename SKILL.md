@@ -327,7 +327,68 @@ outputs:
 - **问题**：删除 `global_review` 后，`steps` 数组仍保留6条，导致label和执行不匹配
 - **修复**：数组改为5条，Step 4 label改为"逐章审查"，所有 index 顺移
 
+### `_deduplicate_defects` 去重key错误（2026-05-16）
+- **问题**：同 rule_id + chapter 下，用 `title[:30]` 做去重 key，但 LLM 输出的缺陷 `title` 为空字符串（名称在 `description` 里），导致不同描述被误合并为1条
+- **修复**：key 改为 `description[:100]`
+- **commit**：`dd1e899`（eia-review-agent）
+
+- **严重度统计变量名颠倒（2026-05-16）**
+- **问题**：`if sev == "严重": type_b += 1`——变量名和语义颠倒，type_b 存的其实是 A 类
+- **影响**：Done 日志标签与实际值不符，但 DB 数据映射正确
+- **修复**：统一 `type_a=严重`、`type_b=较重`、`type_c=一般`
+- **commit**：`b47cdd8`（eia-review-agent）
+
+### `_deduplicate_defects` 去重key用错字段（2026-05-16）
+- **问题**：同 rule_id + chapter 下用 `title[:30]` 做去重 key，但 LLM 输出缺陷时 title 为空（名称在 description 里），导致不同描述被误合并为1条
+- **影响**：同一章节同一规则多条不同描述的缺陷只保留1条
+- **修复**：key 改为 `description[:100]`
+- **commit**：`dd1e899`（eia-review-agent）
+
+### 单元测试套件 + Pre-commit hook（2026-05-16）
+- **问题**：R31~R35 每轮都 `NameError: name 'project_id' is not defined`，规则优化建议每轮生成 0 条
+- **根因**：Step 6 的 try 块里引用了外层不存在的局部变量
+- **修复**：改用已查到的 `review.project_id`
+- **commit**：`e54d18b`（eia-review-agent）
+
+### 单元测试套件 + Pre-commit hook（2026-05-16）
+- **位置**：`backend/tests/`（3个新文件，77 tests）
+- **新测试**：`test_validate_findings.py`（C-021降级）、`test_severity_mapping.py`（映射）、`test_rule_optimization.py`（project_id/去重）
+- **Pre-commit hook**：`backend/.git-hooks/pre-commit`（>1MB 禁止 commit）
+- **commits**：`2ee9fc8`（hook+测试）、`dd1e899`（dedup修复）
+
+### R35 缺陷核实（2026-05-16）
+- **结果**：37条（严重6/较重27/一般4）；全部37条关键词命中；6条严重全为 B-005 类
+- **核实脚本**：`docs/verify_r35_defects.py`
+
 ## 版本
+
+- v2.38 (2026-05-16) — 单元测试+Pre-commit hook+R35缺陷全核实
+  - **单元测试**：3个新文件，77 tests（test_validate_findings/severity_mapping/rule_optimization）
+  - **Pre-commit hook**：>1MB 文件禁止 commit，防止 review.db 再入仓库
+  - **Bug修复**：deduplicate key title→description（`dd1e899`）、severity变量名颠倒（`b47cdd8`）、project_id undefined（`e54d18b`）
+  - **R35核实**：37条（严重6/较重27/一般4）；**命中率100%**（37/37属实，0存疑，0不实）
+  - 详见 `references/r35_defect_verification_20260510.md`
+
+- v2.37 (2026-05-16) — post_validate 死代码修复
+  - **根因**：`validate_findings` 和 `cross_validate_findings` 都在 `if __name__ == "__main__"` 块下，production 从未调用；所有 R34 优化方案（严重度校验/B→A降级）实际未生效
+  - **修复**：① pre_scan_report 改为可选参数（None时不阻断校验）② 新增 C-021 系列 B→A 强制降级逻辑 ③ 接入 reviews.py 行409-423 ④ DB写入前统一严重度映射（high→严重/medium→较重/low→一般）
+  - **影响**：C-021-01~05 共5条从"严重"降为"较重"，R35起生效
+  - 详见 `references/post_validate_dead_code_r34_20260516.md`
+
+- v2.36 (2026-05-16) — R34验证（2026-05-10）：R33→R34严重度分布（严重22→20，较重28→25，一般3→1，总53→46）
+  - **P0-1**：A类-2（S-019/S-027消失），但**新BUG：C-021-01~05在R34被误升为严重(A)，规则库定级为较重(B)**，根因post_validate.py只拦截A类降级，未校验B→A升序
+  - **P0-2**：S-019/S-027降级条件生效 ✓
+  - **P1-1**：C-019跨章节兜底生效，C-019-01~05全系列归零 ✓（待抽查真伪）
+  - **P2-1**：`cross_validate_findings`反向效果——C-010从1条→4条；对"缺失/未X"否定词过于敏感，不适用于数据缺失类规则
+  - **待办**：修复post_validate.py B→A升序校验；核实S-017；抽查C-019消失真伪
+  - 详见 `references/r34_verification_20260510.md`（四轮对比R31→R32→R33→R34）
+
+- v2.36 (2026-05-16) — 全部优化方案10项完成（R33质量评估后续）
+  - post_validate：新增A类严重度校验（无明确法规依据时打降级提示）+ `cross_validate_findings()`章节一致性交叉验证（C-010高风险规则）
+  - S-019甲醇特殊性：GB37823-2019表1无甲醇专属限值，引用DB44/27-2001不构成明确违规
+  - S-027声环境等级：新增HJ2.4-2021第5.2.5条官方答疑，结论正确但论证不充分→维持B
+  - C-019跨章节适配：全部5条规则强化"必须检索其他章节"强制表述
+  - 4条commit已push：463b215/b7cfdb0/ce5e161/1e68cb3
 - v2.35 (2026-05-15) — R33核实：7条规则增加"✅降级条件"字段，消除严重度整体偏高；新增"降级条件字段"技术体系；建立跨版本严重度对比质量监控方法
   - 新增规则优化模式：✅降级条件字段（C-003-01/C-004-01/C-019-03/B-005-02/B-008-02/S-019/S-027共7条）
   - R33严重度核实结论修正：A类暴涨24条（+24），非C类暴涨；严重度整体偏高而非低估
@@ -345,6 +406,8 @@ outputs:
 
 ---
 
+- `references/r35_defect_verification_20260510.md` — R35缺陷逐一核实报告（37条全属实，命中率100%）
+
 **支持文件**：
 - `references/skill_directory_structure_20260508.md` — Skill目录结构与运行时文件路径（含路径fallback说明）
 - `references/step_index_drift_prevention_20260508.md` — 步骤编号维护规范
@@ -359,10 +422,14 @@ outputs:
 - `references/r32_defect_verification_20260515.md` — R32缺陷核实方法论与LLM误判新模式（8条假阳性，含严重程度调整、4类新误判模式）
 - `references/completeness_check_bug_20260509.md` — 完整性检查附件章节误报根因（splitChapters vs extract_from_docx 两套逻辑）
 - `references/chapter_completeness_bug_20260515.md` — 完整性检查附件章节误报根因（splitChapters vs extract_from_docx 两套逻辑）
+- `references/batch_rule_modification_20260515.md` — 批量规则修改操作记录（60条B类规则✅降级条件，从后向前插入避免行号偏移）
 - `references/r26_52_defect_verification_20260508.md` — R26 52条逐条核实表
 - `references/r26_defect21_chunk_boundary_20260508.md` — 缺陷21根因分析
 - `references/prompt_optimization_r28_20260513.md` — R28 prompt优化方案
 - `references/quality_evaluation_and_self_evolution.md` — 质量评估与自我进化体系
+- `references/post_validate_dead_code_r34_20260516.md` — post_validate 死代码发现与修复（R34根因）
+- `references/optimization_plan_completion_r34_20260516.md` — 优化方案10项完成记录及R34验证预期
+- `references/r34_verification_20260510.md` — R34四轮对比验证报告（R31→R32→R33→R34，C-021误升BUG/P2-1反向效果/S-017核实）
 - `references/ci_debugging_20260508.md` — GitHub Actions CI 典型失败模式
 - `references/lxml_table_verification_20260509.md` — lxml直接解析DOCX验证存疑项（223表 vs python-docx的220表）
 - `references/审核规则库.md` — 主规则库（B/C/A类，179条）

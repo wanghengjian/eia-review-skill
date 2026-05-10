@@ -229,6 +229,75 @@ def check_table_reference_validity(
     return issues
 
 
+def verify_table_existence(
+    chapters_dict: Dict[str, Dict],
+    extract_dir: Path
+) -> List[Dict[str, Any]]:
+    """
+    用提取的实际表格数据（_tables.json）校验正文引用的表号是否真实存在。
+
+    读取 extract_dir/extract/*_tables.json，对比：
+    - 正文引用了哪些表号（从 table_index）
+    - 实际提取到的 table_number 字段
+
+    输出：正文引用了但实际不存在的表号 → 真实假阳性警告
+    """
+    issues: List[Dict[str, Any]] = []
+
+    # 加载 _tables.json
+    tables_files = list(extract_dir.glob("extract/*_tables.json"))
+    if not tables_files:
+        return issues  # 没有表格数据，跳过
+
+    import json
+    with open(tables_files[0], encoding='utf-8') as f:
+        tables_data = json.load(f)
+
+    # 建立真实表号集合（从 table_number 字段）
+    # 格式: {"3.3-1": true, "5.4-2": true, ...}
+    real_table_numbers: set = set()
+    for t in tables_data:
+        tn = t.get("table_number")
+        if tn:
+            real_table_numbers.add(tn)
+
+    if not real_table_numbers:
+        return issues
+
+    # 从正文中提取所有被引用的表号
+    all_referenced: set = set()
+    for ch_data in chapters_dict.values():
+        content = ch_data.get('content', '')
+        for tn in extract_table_numbers(content):
+            all_referenced.add(tn)
+
+    # 对比：正文引用了，但真实表格里没有
+    missing = all_referenced - real_table_numbers
+    for missing_tn in sorted(missing):
+        # 找出哪章节引用了这个表号
+        for ch_num, ch_data in chapters_dict.items():
+            content = ch_data.get('content', '')
+            refs_in_ch = extract_table_numbers(content)
+            if missing_tn in refs_in_ch:
+                # 取第一个引用上下文
+                for m in TABLE_NUM_PATTERN.finditer(content):
+                    if m.group(1) == missing_tn:
+                        ctx = content[max(0, m.start()-30):m.end()+30].strip()
+                        break
+                else:
+                    ctx = f"引用了表{missing_tn}"
+                issues.append({
+                    "chapter": ch_num,
+                    "table_num": missing_tn,
+                    "issue_type": "TABLE_NUMBER_NOT_IN_EXTRACTED",
+                    "context": ctx,
+                    "description": f"正文引用「表{missing_tn}」，但实际提取的表格中未找到此表号"
+                })
+                break
+
+    return issues
+
+
 def generate_pre_scan_report(
     extract_dir: Path,
     output_path: Optional[Path] = None
@@ -272,9 +341,13 @@ def generate_pre_scan_report(
     # 3. 表格引用有效性
     table_issues = check_table_reference_validity(chapters_dict, table_index)
 
+    # 3b. 真实表号存在性校验（用实际提取的表格数据）
+    table_existence_issues = verify_table_existence(chapters_dict, extract_dir)
+
     # 4. 生成 LLM prompt 注入文本
     llm_injection = generate_llm_injection(
-        table_index, numeric_results, table_issues, chapters_dict
+        table_index, numeric_results, table_issues, chapters_dict,
+        table_existence_issues
     )
 
     report = {
@@ -282,6 +355,7 @@ def generate_pre_scan_report(
         "table_count": len(table_index),
         "numeric_results": numeric_results,
         "table_issues": table_issues,
+        "table_existence_issues": table_existence_issues,
         "llm_injection": llm_injection,
         "metadata": {
             "extract_dir": str(extract_dir),
@@ -301,11 +375,14 @@ def generate_llm_injection(
     table_index: Dict[str, List[str]],
     numeric_results: List[Dict[str, Any]],
     table_issues: List[Dict[str, Any]],
-    chapters_dict: Dict[str, Dict]
+    chapters_dict: Dict[str, Dict],
+    table_existence_issues: List[Dict[str, Any]] = None
 ) -> str:
     """
     生成注入到 LLM prompt 的预扫描结果文本。
     """
+    if table_existence_issues is None:
+        table_existence_issues = []
     lines = ["\n## 已知信息（预扫描结果）\n"]
 
     # 1. 表格编号索引（按章节分组，列出关键表）
@@ -359,6 +436,15 @@ def generate_llm_injection(
         lines.append("\n**⚠️ 关键警告：**")
         for w in warnings[:5]:
             lines.append(f"- {w}")
+
+    # 4b. 真实表号存在性警告（正文引用了但实际表格中未找到）
+    if table_existence_issues:
+        lines.append("\n**⚠️ 表号真实性警告（预扫描验证过实际表格）：**")
+        for issue in table_existence_issues[:10]:
+            lines.append(
+                f"- ❌ 第{issue['chapter']}章：{issue['description']} "
+                f"（上下文：「{issue['context'][:40]}...」）"
+            )
 
     lines.append("\n*以上为机械预扫描结果，供参考。如预扫描与人工判断不符，以人工判断为准。*")
 

@@ -93,7 +93,7 @@ validated = validate_findings(raw_findings, pre_scan_report)
 summary = summarize_flags(validated)
 ```
 
-### 校验规则
+### 校验规则（2026-05-16 更新）
 
 | 规则ID | 场景 | flag |
 |--------|------|------|
@@ -101,6 +101,22 @@ summary = summarize_flags(validated)
 | B-005-01 / B-005-02 | LLM说数值矛盾但预扫描已验算一致 | `B-005数值矛盾` |
 | C-001 | 一致时记为缺陷 | `C-001类：一致时应描述为符合` |
 | C-019 | 公众参与跨章节适用 | `C-019跨章节：确认内容是否在概述章节` |
+| A类缺陷 | 缺陷描述中无明确法规/标准强制依据关键词 | `A_WITHOUT_EXPLICIT_LAW` → 降级提示 |
+
+### 新增：`cross_validate_findings()`（2026-05-16）
+
+检测LLM缺陷描述与报告原文的矛盾，用于catch高风险规则的阅读理解错误。
+
+```python
+from post_validate import cross_validate_findings
+validated = cross_validate_findings(raw_findings, full_report_text)
+```
+
+**高风险规则**：`C-010-03`, `C-010-01`, `C-010-02`
+
+**机制**：检测缺陷描述中的否定词（缺少/未提及/未引用/未包含），在报告中检索是否存在矛盾的正向表述。若发现矛盾，追加 `_cross_flags` 并设置 `_flag_type=CROSS_VALIDATION_FAILED`。
+
+**适用条件**：仅对高风险规则执行，避免全文检索成本。
 
 ---
 
