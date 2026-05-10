@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# 表格编号正则：表1.4-1, 表1.4-2, 表3.5-31, 表5.3-5 等
-TABLE_NUM_PATTERN = re.compile(r'表(\d+(?:[.-]\d+)+)')
+# 表格编号正则：表1.4-1, 表 1.4-2, 表3.3-1, 表5.4-2 等（表号前可能有空格）
+TABLE_NUM_PATTERN = re.compile(r'表\s*(\d+(?:[.-]\d+)+)')
 
 # 尝试导入文档处理库
 try:
