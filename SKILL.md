@@ -399,21 +399,27 @@ outputs:
 
 ## 质量验证体系（2026-05-19 更新）
 
-### ⚠️ 重要：自检 verify_defect() 的 Regression（2026-05-19 发现）
+### ✅ 自检 verify_defect() 已恢复 LLM 核实模式（2026-05-19）
 
-**`self_check.py` 的 `verify_defect()` 函数在某个时间点被悄悄替换为纯正则版**（`re.finditer` 全文匹配关键词），**不再是 LLM 核实版**。
+**5.5 日那次慢的自检** = LLM 核实版。某个时间点被悄悄替换为纯正则版（`re.finditer` 全文匹配关键词），2026-05-19 已恢复为 LLM 核实版。
 
-| | LLM 核实版（原版，5.5日使用） | 正则核实版（当前，regression 版） |
-|---|---|---|
-| 方法 | 章节+表格+关键词构建 Prompt，DeepSeek 判断 | `re.finditer` 扫 `full_text` 字符串 |
-| 耗时 | 几十分钟（逐条调用 LLM） | **几秒**（204条全跑完） |
-| 准确性 | 高（有推理和上下文判断能力） | 低（无推理，只能统计词频） |
-| 证据 | LLM 写的结构化判定理由 | 关键词命中次数 |
-| 判断逻辑 | LLM 自己理解"这句话是不是在讨论同一件事" | 纯字符串出现即算命中 |
+**LLM 核实版特征**：
+- 每条缺陷单独调用 DeepSeek（`verify_defect_llm()` 函数）
+- 传入：`description` + `report_excerpt` + 所在章节名 → DeepSeek 判断
+- 输出：`verdict`（属实/存疑/不实）+ `hit_rate` + `summary`（专家可读判定说明）+ `reasoning`（推理过程）
+- 耗时：204条约 12 分钟（3.5秒/条限速）
 
-**Regression 根因**：`verify_defect()` 内部 `search_in_text()` 只做了 `re.finditer` 正则匹配，没有任何 LLM API 调用。某次代码修改时将 LLM 核实逻辑替换成了正则版，速度提升但准确性大幅下降。
+**核实判断标准**：
+- **属实**：缺陷描述的核心问题在报告原文中**有明确文字证据**
+- **存疑**：报告有相关表述，但**证据模糊/不完整/相互矛盾**，需人工复核
+- **不实**：报告原文中**完全找不到**缺陷所指内容，或原文**明确矛盾**，可能为 LLM 编造
 
-**5.5 日那次慢的自检** = LLM 核实版。现在这个快版本 = 正则版，**两者不是同一个东西**。
+**DB 字段 schema**（`defect_verification_results` 表）：
+- `verify_keywords` → 存 **summary 字符串**（专家可读的判定说明）
+- `verify_context` → 存 `{"reasoning": "...", ...}`（LLM 推理过程）
+- `hit_rate` → 0.0/0.5/1.0（由 confidence high/medium/low 映射）
+
+**⚠️ 重要**：INSERT 和 GET 必须匹配——写入 summary 字符串到 `verify_keywords`，前端 `db_results` 路径直接读 `d["verify_keywords"]`。早期版本 INSERT 存的是空列表 `[]`，GET 读 `[]` 被判空后 fallback 到关键词数组，导致前端显示 `["不一致", "矛盾", "废水"]` 而非判定说明。
 
 **两种验证方式**
 

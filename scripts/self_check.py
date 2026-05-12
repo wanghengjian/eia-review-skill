@@ -57,14 +57,18 @@ UNCERTAIN = "存疑" # 有相关证据但不确凿，需人工复核
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _load_api_key() -> str:
-    """从 ~/.hermes/config.yaml 加载 DeepSeek API Key"""
-    import yaml
-    config_file = Path.home() / '.hermes' / 'config.yaml'
-    if config_file.exists():
-        config = yaml.safe_load(config_file.read_text()) or {}
-    else:
-        config = {}
-    return config.get('deepseek_api_key', '')
+    """从 backend/.env 或环境变量加载 DeepSeek API Key"""
+    # 优先从 backend/.env 加载（与 llm_client.py 保持一致）
+    backend_env = Path.home() / ".hermes" / "workspace" / "eia-review" / "backend" / ".env"
+    if backend_env.exists():
+        for line in backend_env.read_text().splitlines():
+            if line.startswith("DEEPSEEK_API_KEY="):
+                key = line.split("=", 1)[1].strip()
+                if key and len(key) > 5:
+                    return key
+    # Fallback 到环境变量
+    import os
+    return os.environ.get("DEEPSEEK_API_KEY", "")
 
 
 def verify_defect_llm(
@@ -370,7 +374,7 @@ def load_docx_with_chapters(docx_path: str) -> dict:
     for tbl in doc.element.body.iter(qn('w:tbl')):
         rows = []
         for row in tbl.iter(qn('w:tr')):
-            cells = [cell.text.strip() for cell in row.iter(qn('w:tc'))]
+            cells = [cell.text.strip() if cell.text else "" for cell in row.iter(qn('w:tc'))]
             if any(cells):
                 rows.append(cells)
         if rows:
