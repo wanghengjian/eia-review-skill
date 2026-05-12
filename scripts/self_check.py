@@ -434,7 +434,8 @@ def run_self_check(review_id: int) -> dict:
     # ── 7. 生成优化建议 ───────────────────────────────────────────────────
     suggestions = generate_optimization_suggestions(results, analysis)
 
-    # ── 8. 写回DB ────────────────────────────────────────────────────────
+    # ── 8. 写回DB（先删旧记录再插入新记录）───────────────────────────────
+    db.execute("DELETE FROM defect_verification_results WHERE review_id = ?", (review_id,))
     now = datetime.now().isoformat()
     for r in results:
         db.execute("""
