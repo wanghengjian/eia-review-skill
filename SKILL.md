@@ -399,7 +399,23 @@ outputs:
 
 ## 质量验证体系（2026-05-19 更新）
 
-### 两种验证方式
+### ⚠️ 重要：自检 verify_defect() 的 Regression（2026-05-19 发现）
+
+**`self_check.py` 的 `verify_defect()` 函数在某个时间点被悄悄替换为纯正则版**（`re.finditer` 全文匹配关键词），**不再是 LLM 核实版**。
+
+| | LLM 核实版（原版，5.5日使用） | 正则核实版（当前，regression 版） |
+|---|---|---|
+| 方法 | 章节+表格+关键词构建 Prompt，DeepSeek 判断 | `re.finditer` 扫 `full_text` 字符串 |
+| 耗时 | 几十分钟（逐条调用 LLM） | **几秒**（204条全跑完） |
+| 准确性 | 高（有推理和上下文判断能力） | 低（无推理，只能统计词频） |
+| 证据 | LLM 写的结构化判定理由 | 关键词命中次数 |
+| 判断逻辑 | LLM 自己理解"这句话是不是在讨论同一件事" | 纯字符串出现即算命中 |
+
+**Regression 根因**：`verify_defect()` 内部 `search_in_text()` 只做了 `re.finditer` 正则匹配，没有任何 LLM API 调用。某次代码修改时将 LLM 核实逻辑替换成了正则版，速度提升但准确性大幅下降。
+
+**5.5 日那次慢的自检** = LLM 核实版。现在这个快版本 = 正则版，**两者不是同一个东西**。
+
+**两种验证方式**
 
 | | 自动验证（自检） | 人工核实 |
 |---|---|---|
@@ -408,6 +424,7 @@ outputs:
 | 入口 | 审查结果页面 + SelfCheck.vue | 审查结果页面（**待接入**） |
 | 存储表 | `defect_verification_results` | 新建 `review_manual_checks`（**待实施**） |
 | 优先级 | 主力（专家少先用这个） | 补充（质量要求高时用） |
+| **注意** | 当前为**正则版**（快但无推理） | — |
 
 ### 自动验证链路（✅ 已打通，2026-05-19）
 
@@ -494,6 +511,7 @@ outputs:
 
 - `references/r35_defect_verification_20260510.md` — R35缺陷逐一核实报告
 - `references/self_check_tool_20260510.md` — 自检工具用法与局限性说明
+- `references/self_check_verification_summary_20260519.md` — 核实依据不够专家友好 / verify_context 截断 / 并发无锁 / 记录累积覆盖
 - `references/self_check_frontend_backend_mismatch_20260519.md` — SelfCheck.vue 前后端链路不通问题记录（前端读JSON/后端写DB，需新建API打通）
 
 **支持文件**：
