@@ -674,9 +674,8 @@ def run_self_check(review_id: int) -> dict:
             r["rule_id"],
             r["verdict"],
             r["verify_result"]["hit_rate"],
-            json.dumps([], ensure_ascii=False),
-            json.dumps({"summary": r["verify_result"]["summary"],
-                        "reasoning": r["verify_result"]["reasoning"]}, ensure_ascii=False),
+            r["verify_result"]["summary"],   # 专家可读的判定说明
+            json.dumps({"reasoning": r["verify_result"]["reasoning"]}, ensure_ascii=False),
             now,
         ))
 
