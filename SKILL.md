@@ -405,25 +405,26 @@ outputs:
 |---|---|---|
 | 别名 | `self_check.py` | 专家复核 |
 | 执行者 | 系统（关键词+全文检索） | 专家人工判定 |
-| 入口 | 审查结果页面 + SelfCheck.vue | 审查结果页面（待接入） |
-| 存储表 | `defect_verification_results` | 新建 `review_manual_checks`（待实施） |
+| 入口 | 审查结果页面 + SelfCheck.vue | 审查结果页面（**待接入**） |
+| 存储表 | `defect_verification_results` | 新建 `review_manual_checks`（**待实施**） |
 | 优先级 | 主力（专家少先用这个） | 补充（质量要求高时用） |
 
-**自动验证逻辑**（`scripts/self_check.py`）：
-1. 从缺陷描述提取关键词（正则抽名词/数值/标准号）
-2. 在 DOCX 全文中搜索关键词命中情况
-3. 全命中→属实；≥50%命中→存疑；<50%→不实
-4. 结果写入 `defect_verification_results` 表
+### 自动验证链路（✅ 已打通，2026-05-19）
 
-**⚠️ 前后端链路不通（已知问题）**：
-- 后端 `POST /rules/self-check/run/{id}` 调用 `self_check.py` → 结果写 DB
-- 前端 `SelfCheck.vue` 调用 `GET /rules/self-check/{id}` → 读的是 **JSON 文件**（`self_check_report_{id}.json`）
-- 正确路径：前端应改为调用 `GET /api/reviews/{id}/verification`（新 API，从 DB 读）
-- 修复方案：新建 `GET /api/reviews/{review_id}/verification` 从 `defect_verification_results` 表聚合数据
+**前后端链路修复**：
+1. 新增 `GET /api/reviews` 端点（返回审查列表，解决 405 问题）
+2. SelfCheck.vue 改用 `GET /reviews`（解决下拉框 No data 问题）
+3. FastAPI Pydantic datetime 序列化问题 → 手动 dict 序列化绕过
+4. SQLAlchemy 2.0 `dict(r)` 报错 → 改 `dict(r._mapping)`
+5. SQLite `FIELD()` 函数不存在 → 改 `CASE WHEN` 排序
 
-### 实施优先级
-1. **先打通自动验证 DB 链路**：新建 `GET /api/reviews/{review_id}/verification` + 改造 `SelfCheck.vue` 从 DB 读
-2. **再做人工核实**：新建 `review_manual_checks` 表 + `POST /api/reviews/{review_id}/manual-check` + ReviewResult.vue 加判定按钮
+**当前自检数据**：review_id=35 有 37 条 `defect_verification_results`（属实20/存疑17，命中率54.1%）
+
+### 待开发：人工核实功能
+
+- **DB**：新建 `review_manual_checks` 表（id, review_id, defect_id, verdict, comment, checked_by, checked_at）
+- **后端**：新增 `POST /api/reviews/{review_id}/manual-check`（批量提交）和 `GET /api/reviews/{review_id}/manual-check`（查询）
+- **前端**：审查结果页面加"人工核实"按钮，SelfCheck.vue 加 Tab（自动验证/人工核实/汇总）
 
 ---
 

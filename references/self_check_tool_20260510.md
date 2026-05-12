@@ -58,6 +58,7 @@ CREATE TABLE defect_verification_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     defect_id INTEGER NOT NULL,
     review_id INTEGER NOT NULL,
+    rule_id VARCHAR(20),              -- 2026-05-19 新增（旧数据需回填，见下）
     verdict TEXT NOT NULL,           -- 属实/存疑/不实
     hit_rate REAL DEFAULT 0.0,       -- 关键词命中率
     verify_keywords TEXT,            -- 使用的关键词（JSON 列表）
@@ -65,6 +66,36 @@ CREATE TABLE defect_verification_results (
     created_at TEXT NOT NULL         -- ISO 时间戳
 );
 ```
+
+**回填 rule_id（旧数据，2026-05-19 执行）**：
+```sql
+UPDATE defect_verification_results 
+SET rule_id = (
+    SELECT rule_id FROM defects 
+    WHERE defects.id = defect_verification_results.defect_id
+) 
+WHERE rule_id IS NULL;
+-- 结果：37条全部回填成功
+```
+
+## 后端 API（2026-05-19 重构）
+
+**设计原则**：DB 为唯一数据源，JSON 文件仅作参考，不再作为读取来源。
+
+| 端点 | 路由 | 数据来源 |
+|---|---|---|
+| GET | `/api/rules/self-check/{review_id}` | DB（join defects 表） |
+| POST | `/api/rules/self-check/run/{review_id}` | 调用 self_check.py 脚本写 DB，再查 DB 返回 |
+
+**关键实现细节**：
+- SQLAlchemy 2.0：`Row` 对象用 `dict(row._mapping)` 转换，不能用 `dict(row)`（后者报 `TypeError`）
+- SQLite 排序：不用 MySQL 的 `FIELD()`，用 `CASE WHEN`：
+  ```sql
+  ORDER BY CASE severity
+      WHEN '严重' THEN 1 WHEN '较重' THEN 2
+      WHEN '一般' THEN 3 WHEN '轻微' THEN 4 ELSE 5 END, id
+  ```
+- 返回格式与前端 `SelfCheck.vue` 的 `buildDefects()` 完全兼容，无需前端改动
 
 ---
 

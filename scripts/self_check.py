@@ -448,8 +448,8 @@ def run_self_check(review_id: int) -> dict:
             r["rule_id"],
             r["verdict"],
             r["verify_result"]["hit_rate"],
-            _json.dumps(r["keywords_used"], ensure_ascii=False),
-            _json.dumps(r["verify_result"]["hits"], ensure_ascii=False),
+            json.dumps(r["keywords_used"], ensure_ascii=False),
+            json.dumps(r["verify_result"]["hits"], ensure_ascii=False),
             now,
         ))
 
