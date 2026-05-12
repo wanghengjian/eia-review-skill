@@ -439,16 +439,17 @@ def run_self_check(review_id: int) -> dict:
     for r in results:
         db.execute("""
             INSERT INTO defect_verification_results
-            (defect_id, review_id, verdict, hit_rate, verify_keywords,
+            (defect_id, review_id, rule_id, verdict, hit_rate, verify_keywords,
              verify_context, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             r["defect_id"],
             review_id,
+            r["rule_id"],
             r["verdict"],
             r["verify_result"]["hit_rate"],
-            json.dumps(r["keywords_used"], ensure_ascii=False),
-            json.dumps(r["verify_result"]["hits"], ensure_ascii=False),
+            _json.dumps(r["keywords_used"], ensure_ascii=False),
+            _json.dumps(r["verify_result"]["hits"], ensure_ascii=False),
             now,
         ))
 

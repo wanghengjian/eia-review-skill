@@ -388,13 +388,50 @@ outputs:
 - **Pre-commit hook**：`backend/.git-hooks/pre-commit`（>1MB 禁止 commit，防止 review.db 再入仓库）
 - **commits**：`2ee9fc8`（hook+测试）、`dd1e899`（dedup修复）、`e54d18b`（project_id）
 
-### R35 缺陷核实（2026-05-16）
-- **方法**：python-docx 提取全文本（段落2574段+表格220个），对37条缺陷逐条搜索关键词验证
-- **结果**：37条（严重6/较重27/一般4）；全部37条关键词命中；**命中率100%**（0存疑，0不实）
-- **核实脚本**：`docs/verify_r35_defects.py`（workspace docs/，不在git）；`scripts/verify_r35_defects.py`（skill scripts/）
-- **核实报告**：`references/r35_defect_verification_20260510.md`（37条逐条核实结论）
+- **R35核实（2026-05-10）**：
+  - 自检命中率**54.1%**（属实20/37），存疑17条（需人工复核），不实0条
+  - 之前手工核实认定的"100%属实"包含了对17条存疑项的人工主观判断，自动化自检揭示了更多不确定性
+  - 自检工具关键词策略有bug（整句作关键词→不可能匹配），修复后命中率从0%回升至54.1%
+  - 17条存疑项多为描述内容与报告原文"部分相关但不够精确"的缺陷，属语义精确性问题，工具无法判断
+  - 详见 `references/self_check_tool_20260510.md`
 
-## 版本
+**严重度系统性高估（R33 vs R32，同一报告，2026-05-09，修正）**：
+
+## 质量验证体系（2026-05-19 更新）
+
+### 两种验证方式
+
+| | 自动验证（自检） | 人工核实 |
+|---|---|---|
+| 别名 | `self_check.py` | 专家复核 |
+| 执行者 | 系统（关键词+全文检索） | 专家人工判定 |
+| 入口 | 审查结果页面 + SelfCheck.vue | 审查结果页面（待接入） |
+| 存储表 | `defect_verification_results` | 新建 `review_manual_checks`（待实施） |
+| 优先级 | 主力（专家少先用这个） | 补充（质量要求高时用） |
+
+**自动验证逻辑**（`scripts/self_check.py`）：
+1. 从缺陷描述提取关键词（正则抽名词/数值/标准号）
+2. 在 DOCX 全文中搜索关键词命中情况
+3. 全命中→属实；≥50%命中→存疑；<50%→不实
+4. 结果写入 `defect_verification_results` 表
+
+**⚠️ 前后端链路不通（已知问题）**：
+- 后端 `POST /rules/self-check/run/{id}` 调用 `self_check.py` → 结果写 DB
+- 前端 `SelfCheck.vue` 调用 `GET /rules/self-check/{id}` → 读的是 **JSON 文件**（`self_check_report_{id}.json`）
+- 正确路径：前端应改为调用 `GET /api/reviews/{id}/verification`（新 API，从 DB 读）
+- 修复方案：新建 `GET /api/reviews/{review_id}/verification` 从 `defect_verification_results` 表聚合数据
+
+### 实施优先级
+1. **先打通自动验证 DB 链路**：新建 `GET /api/reviews/{review_id}/verification` + 改造 `SelfCheck.vue` 从 DB 读
+2. **再做人工核实**：新建 `review_manual_checks` 表 + `POST /api/reviews/{review_id}/manual-check` + ReviewResult.vue 加判定按钮
+
+---
+
+- v2.41 (2026-05-11) — 自检工具 `self_check.py` 上线 + R35核实结论修正
+  - 自检工具：对 review_id 缺陷自动化核实，生成质量报告和优化建议（DB: `defect_verification_results`）
+  - 关键词提取策略修复：避免整句作关键词，命中率从 0% 回升至 54.1%
+  - R35核实结论修正：自检属实20/37（54.1%），存疑17条需人工复核，不实0条
+  - 详见 `references/self_check_tool_20260510.md`
 
 - v2.40 (2026-05-11) — 表格编号正则修复 + 死代码清理
   - **`TABLE_NUM_PATTERN`**：正则从 `表(\d+(?:[.-]\d+)+)` 改为 `表\s*(\d+(?:[.-]\d+)+)`，兼容表号前空格
@@ -454,10 +491,13 @@ outputs:
 
 ---
 
-- `references/r35_defect_verification_20260510.md` — R35缺陷逐一核实报告（37条全属实，命中率100%）
+- `references/r35_defect_verification_20260510.md` — R35缺陷逐一核实报告
+- `references/self_check_tool_20260510.md` — 自检工具用法与局限性说明
+- `references/self_check_frontend_backend_mismatch_20260519.md` — SelfCheck.vue 前后端链路不通问题记录（前端读JSON/后端写DB，需新建API打通）
 
 **支持文件**：
 - `references/skill_directory_structure_20260508.md` — Skill目录结构与运行时文件路径（含路径fallback说明）
+- `references/eia-review-db-schema-notes.md` — 数据库表结构、字段说明、质量指标计算公式、章节归一化函数参考
 - `references/step_index_drift_prevention_20260508.md` — 步骤编号维护规范
 - `references/rules_file_structure_20260508.md` — 规则库文件体系说明
 - `references/rules_split_20260510.md` — 规则库拆分操作记录
