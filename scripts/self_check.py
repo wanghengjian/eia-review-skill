@@ -137,16 +137,30 @@ def verify_defect(keywords: list[str], full: str, chapter: str, description: str
     else:
         verdict = UNREAL
 
-    hit_detail = "; ".join(
-        f"{kw}({len(h)}处)" for kw, h in all_hits.items() if h
-    ) or "无命中"
+    # 生成专家可读的判定说明
+    if verdict == REAL:
+        matched = [(kw, len(h)) for kw, h in all_hits.items() if h]
+        summary = "属实。命中：{m}。规则要求内容在报告对应章节有明确描述，可作为有效缺陷。" if matched else "属实（无关键词但判定属实）"
+        summary = summary.format(m="; ".join(f"{kw}({n}处)" for kw, n in matched))
+    elif verdict == UNCERTAIN:
+        matched = [(kw, len(h)) for kw, h in all_hits.items() if h]
+        missing = [kw for kw, h in all_hits.items() if not h]
+        parts = []
+        if matched:
+            parts.append("部分命中：" + "; ".join(f"{kw}({n}处)" for kw, n in matched))
+        if missing:
+            parts.append("未找到：" + "、".join(missing))
+        summary = "存疑。" + "；".join(parts) + "。证据不足以明确判定，建议人工复核。"
+    else:
+        missing = [kw for kw, h in all_hits.items() if not h]
+        summary = f"不实。未在指定章节找到规则要求的关键词（{len(missing)}个关键词均无命中），可能为LLM编造或规则指向章节有误，建议核实原文。"
 
     return {
         "verdict": verdict,
         "hit_rate": round(hit_rate, 2),
-        "hits": {kw: [{"context": h["context"]} for h in hits]  # hits是dict列表
+        "hits": {kw: [{"context": h["context"]} for h in hits]
                  for kw, hits in all_hits.items() if hits},
-        "summary": hit_detail,
+        "summary": summary,
     }
 
 
